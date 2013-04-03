@@ -1,0 +1,28 @@
+<!DOCTYPE HTML>
+<html><head><meta charset="UTF-8"><title>Main</title><style type="text/css">html,head,body { padding:0; margin:0; }body { font-family: helvetica, arial, sans-serif; }</style></head><body><script type="text/javascript" src="/js/elm.js"></script><script type="text/javascript">
+try{
+
+if (Elm.Main) throw new Error("Module name collision, 'Main' is already defined."); 
+Elm.Main=function(){
+ var $op={};
+ for(Elm['i'] in Elm){eval('var '+Elm['i']+'=Elm[Elm.i];');}
+ try{
+  if (!(Elm.Prelude instanceof Object)) throw new Error('module not found');
+ } catch(e) {
+  throw new Error("Module 'Prelude' is missing. Compile with --make flag or load missing module in a separate JavaScript file.");
+ }
+ var hiddenVars={};
+ for (Elm['i'] in Elm.Prelude) {
+  if (hiddenVars[Elm['i']]) continue;
+  eval('var ' + Elm['i'] + ' = Elm.Prelude[Elm.i];');}
+ var msgs_0=lift(show)(count(Mouse.clicks));
+ var main_1=lift(asText)(WebSocket.open(Value.str('ws://localhost:8000/ws'))(msgs_0));
+ return {$op : {},
+ msgs:msgs_0,
+ main:main_1};}();
+Elm.main=function(){
+ return Elm.Main.main;};
+} catch (e) {
+Elm.main=function() {
+var msg = ('<br/><h2>Your browser may not be supported. Are you using a modern browser?</h2>' + '<br/><span style="color:grey">Runtime Error in Main module:<br/>' + e + '<br/><br/>The problem may stem from an improper usage of:<br/>WebSocket.open</span>');
+document.body.innerHTML = Elm.Text.monospace(msg);throw e;};}</script><div id="widthChecker" style="width:100%; height:1px; position:absolute; top:-1px;"></div><div id="content"></div><script type="text/javascript">Dispatcher.initialize()</script><noscript><p>ws://localhost:8000/ws</p></noscript></body></html>
