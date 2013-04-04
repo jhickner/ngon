@@ -1,0 +1,72 @@
+Processing a packet
+
+data needed:
+  - Packet
+  - User
+  - STM TVars
+
+- packets with id return a response packet
+- packet processing may also yield other messages
+ 
+- incoming packet: {"e":"o/foo/i","p":{"x":32}}
+- [String "o", String oid, String "i"] (Just (A.Object o))
+- atomically
+  - check objectlocks TVar
+    - if locked by someone else: 
+      return: Fail (String "object is locked")
+    - if lock ok
+      - modify object
+        return: OK (A.Bool True) (ObjectUpdated ObjectId)
+
+
+
+-------------------------------------------------------------------------------
+
+larger packet, but we gain simplicity and consistency across clients
+
+::is:["foo",{"x":32}] - 21
+
+{"e":"o/foo/i","p":{"x":32}} - 28
+
+-------------------------------------------------------------------------------
+
+STM TVars
+
+users: HashMap userid User
+
+usersubs: Set userid
+
+objectlocks: IxSet userid objectid
+
+objectrels: IxSet userid objectid type
+
+objects: HashMap objectid Object
+
+objectsubs: IxSet userid objectid
+
+
+-------------------------------------------------------------------------------
+API: suffix verb method
+
+objects:
+  - create       -> [o]bjects/foo/create   {x:0, y:0}
+  - delete       -> [o]bjects/foo/delete
+  - get          -> [o]bjects/foo
+  - set          -> [o]bjects/foo          {...}
+  - inc          -> [o]bjects/foo/[i]nc    {...}
+  - lock         -> [o]bjects/foo/[l]ock
+  - unlock       -> [o]bjects/foo/[u]nlock
+  - sub          -> [o]bjects/foo/sub      (no HTTP)
+  - unsub        -> [o]bjects/foo/unsub    (no HTTP)
+
+users:
+  - connect      -> [u]sers/jason/connect
+  - disconnect   -> [u]sers/jason/disconnect
+  - get          -> [u]sers
+  - sub          -> [u]sers/sub
+  - unsub        -> [u]sers/unsub
+  - msg          -> [u]sers/jason/msg  ...
+
+HTTP:
+- all of the above endpoints work as URLS (except subscriptions and ident)
+action method

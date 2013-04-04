@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE OverloadedStrings, RecordWildCards #-}
 
 -- address messages to specific clients in order to change session, etc
 -- better names for objects so you can getOrCreate "ball", but they're
@@ -17,7 +17,8 @@ import Snap.Util.FileServe
 
 --import Control.Monad
 import Control.Monad.IO.Class
---import Control.Concurrent
+import Control.Concurrent
+import Control.Concurrent.STM
 import Control.Applicative
 
 -- socket -> parse json packet -> process it -> possibly send socket response
@@ -28,17 +29,23 @@ import Network.WebSockets (WebSockets, Hybi10)
 import qualified Network.WebSockets as WS
 import Network.WebSockets.Snap
 
+import Control.Monad.Reader
 
 import Data.Text (Text)
 import qualified Data.Text as T
-
-import qualified Data.ByteString.Char8 as B
-import qualified Data.Attoparsec.Text as PT
-import qualified Data.Aeson as A
-import Data.Aeson (ToJSON, FromJSON, decode')
 import Data.Text.Encoding (decodeUtf8)
 
+import qualified Data.HashMap.Strict as M
+import qualified Data.ByteString.Char8 as B
+import qualified Data.ByteString.Lazy as BL
 
+import qualified Data.Attoparsec as PB
+import qualified Data.Aeson.Parser as P
+import qualified Data.Aeson as A
+import Data.Aeson (ToJSON, FromJSON, decode', encode)
+
+
+import Data.Maybe (fromJust, isJust)
 
 import Types
 
@@ -55,28 +62,75 @@ config =
     setAccessLog ConfigNoLog $
     defaultConfig 
 
-runWebServer :: IO ()
-runWebServer = httpServe config (route routes) where
+runWebServer :: Env -> IO ()
+runWebServer env = httpServe config (route routes) where
     routes = [ 
               -- ("/ws", setTimeout 31536000 >> runWebSocketsSnap app)
-             ("/api", api)
+             ("/api", api env)
              , ("/", serveDirectory "static")
              ]
 
 
+sendNotifications (UserUpdated uid) = undefined
 
-api = do
-    -- read the rqPathInfo
-    -- if null path, parse body as raw json packets
-    -- if path, use it as endpoint
-    -- read the requestbody, parse as JSON and use it as payload
-    path' <- decodeUtf8 . rqPathInfo <$> getRequest -- ByteString
-    mpl <- decode' <$> readRequestBody 4096
-    liftIO $ print $ Packet Nothing (parseEndpoint path') mpl
+notify (Error _) = return ()
+notify (OK _ n)  = iatom $ sendNotifications n
+
+mkResponse :: Packet -> Result -> Packet
+mkResponse p (Error v) = p { pPayload = Nothing, pError = Just v }
+mkResponse p (OK v _)  = p { pPayload = Just v }
+
+emptyPacket = Packet Nothing [] Nothing Nothing
+
+runPacket :: NGON (Maybe Packet)
+runPacket = do
+  (_, _, packet) <- ask
+  res <- dispatch (pEndpoint packet)
+  notify res
+  return $ Just $ mkResponse packet res
+    
+true = A.Bool True
+
+string = A.String
+
+iatom = liftIO . atomically
+
+dispatch :: [EndpointComponent] -> NGON Result
+dispatch ep = do
+  (Env{..}, client, packet) <- ask
+  case ep of
+    ["u", uid, "login"] -> iatom $ tryLogin uid client eUsers
+
+
+uidExists :: UserId -> TVar UserMap -> STM Bool
+uidExists uid umap = isJust . M.lookup uid <$> readTVar umap
+
+
+tryLogin :: UserId -> Client -> TVar UserMap -> STM Result
+tryLogin uid client umap = do
+    exists <- uidExists uid umap
+    if exists
+      then return $ Error (string "That user id is already in use.")
+      else do
+          modifyTVar' umap (M.insert uid client) 
+          return $ OK true (UserUpdated uid)
+
+
+api env = do
+    -- TODO: urlDecode rqPathInfo
+    endpoint <- parseEndpoint <$> getRequest
+    payload  <- parsePayload <$> readRequestBody 4096
+    res <- liftIO $ runNGON (env, HTTPClient, mkPacket endpoint payload) runPacket
+    writeJSON . encode . fromJust $ res
   where
-    parseEndpoint t = case PT.parseOnly endpointComponents t of
-                        Left _   -> []
-                        Right es -> es
+    mkPacket e p = Packet (Just 1) e p Nothing
+    parseEndpoint = map T.strip . T.split (=='/') . decodeUtf8 . rqPathInfo
+    parsePayload bs = case PB.parseOnly P.value (toStrict bs) of
+                        Left _  -> Nothing
+                        Right v -> Just v
+      
+
+toStrict = B.concat . BL.toChunks
 
 -- parsing and routing on path components...
 
@@ -94,7 +148,9 @@ api = do
 
 
 main :: IO ()
-main = runWebServer
+main = do
+    env <- Env <$> newTVarIO M.empty
+    runWebServer env
 
 
 {-
