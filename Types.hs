@@ -46,6 +46,12 @@ data Client
   | HTTPClient
     deriving (Show, Eq)
 
+instance ToJSON Client where
+  toJSON SocketClient{}    = String "socket"
+  toJSON WebSocketClient{} = String "websocket"
+  toJSON HTTPClient        = String "http"
+  
+
 data Packet = Packet
     { pId       :: Maybe Integer
     , pEndpoint :: [EndpointComponent]
@@ -85,9 +91,11 @@ endpointComponents = many1 $ char '/' *> component <|> component
 isOKResult (OK _ _) = True
 isOKResult _        = False
 
-data Result = OK Value Notification | Error Value deriving (Show, Eq)
+data Result = OK Value NotificationType | Error Value deriving (Show, Eq)
 
-data Notification = NoNotification
-                  | ObjectUpdated ObjectId
-                  | UserUpdated UserId
-                  deriving (Show, Eq)
+data NotificationType = NoNotification
+                      | ObjectUpdated ObjectId
+                      | UserMessage UserId Value
+                      | UserDisconnected UserId
+                      | UserConnected UserId
+                        deriving (Show, Eq)

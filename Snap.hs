@@ -48,6 +48,7 @@ import Data.Aeson (ToJSON, FromJSON, decode', encode)
 import Data.Maybe (fromJust, isJust)
 
 import Types
+import Actions
 
 
 writeJSON :: (A.ToJSON a, MonadSnap m) => a -> m ()
@@ -89,9 +90,6 @@ runPacket = do
   notify res
   return $ Just $ mkResponse packet res
     
-true = A.Bool True
-
-string = A.String
 
 iatom = liftIO . atomically
 
@@ -102,18 +100,6 @@ dispatch ep = do
     ["u", uid, "login"] -> iatom $ tryLogin uid client eUsers
 
 
-uidExists :: UserId -> TVar UserMap -> STM Bool
-uidExists uid umap = isJust . M.lookup uid <$> readTVar umap
-
-
-tryLogin :: UserId -> Client -> TVar UserMap -> STM Result
-tryLogin uid client umap = do
-    exists <- uidExists uid umap
-    if exists
-      then return $ Error (string "That user id is already in use.")
-      else do
-          modifyTVar' umap (M.insert uid client) 
-          return $ OK true (UserUpdated uid)
 
 
 api env = do
@@ -131,20 +117,6 @@ api env = do
       
 
 toStrict = B.concat . BL.toChunks
-
--- parsing and routing on path components...
-
-
--- HTTP      - lazy bytestring from readRequestBody
--- websocket - bytestring/text
--- socket    - bytestring
-
--- {"p":"o/foo", "p":{"x":0, "y": 0}}
-
-
--- web request happens in snap monad
--- websocket happens in websocket monad
--- run pipe on each websocket message?
 
 
 main :: IO ()
