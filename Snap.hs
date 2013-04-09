@@ -72,6 +72,10 @@ dispatch PacketEnv{..} = dispatch' pEndpoint pAction
     dispatch' ["o", oid] "create"     = createObject oid pPayload sObjects
     dispatch' ["o", oid] "get"        = getObject oid sObjects
     dispatch' ["o", oid] "set"        = mergeObject oid pPayload sObjects
+    dispatch' ["o", oid, prop] "get"  = getObjectProp oid prop sObjects
+    dispatch' ["o", oid, prop] "set"  = setObjectProp oid prop pPayload sObjects
+    dispatch' ["o", oid, prop] "inc"  = incObjectProp oid prop pPayload sObjects
+
     dispatch' ["o", oid] "inc"        = incObject oid pPayload sObjects
     dispatch' ["o"]      "sub"        = subObjects pClient sSubs
 
@@ -79,7 +83,7 @@ dispatch PacketEnv{..} = dispatch' pEndpoint pAction
     dispatch' ["u"]      "get"        = getUsers sUsers
     dispatch' ["u", uid] "connect"    = connectUser uid pClient sUsers
     dispatch' ["u", uid] "disconnect" = disconnectUser uid sUsers
-    dispatch' ["u", uid] "msg"        = msgUser uid pPayload sUsers
+    dispatch' ["u", uid] "set"        = msgUser pPacket uid sUsers
 
     -- File commands
     dispatch' ("f":p)    "get"        = listFiles p
@@ -92,17 +96,24 @@ dispatch PacketEnv{..} = dispatch' pEndpoint pAction
 -- Web API
 
 webAPI env = do
-    action <- parseAction
     packet <- Packet (Just 1) <$> (parseEndpoint <$> getSafePath) 
-                              <*> return action
-                              <*> (parsePayload  <$> readRequestBody 4096)
+                              <*> parseAction
+                              <*> parsePayload
                               <*> return Nothing
     mpacket <- liftIO $ runPacket $ PacketEnv env httpClient packet
     respond' mpacket
   where
     parseEndpoint = map T.pack . splitDirectories
-    parsePayload bs = decodeStrictValue $ toStrict bs
     respond' = writeJSON . fromJust
+
+
+parsePayload :: Snap (Maybe A.Value)
+parsePayload = do
+    -- try querystring first
+    mp <- getQueryParam "p"
+    case mp of
+      Just x -> return $ decodeStrictValue x
+      Nothing -> decodeStrictValue . toStrict <$> readRequestBody 4096
 
 parseAction :: Snap Text
 parseAction = do
