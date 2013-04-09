@@ -1,8 +1,9 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-import Control.Proxy.TCP
 import Control.Monad
+import Network.Socket (Socket)
 import Network.Socket.ByteString hiding (send)
+import TCP
 import Types
 
 import qualified Data.Attoparsec as PB
@@ -21,19 +22,19 @@ main = connect "localhost" "8001" $ \(sock,_) -> do
 toStrict = B.concat . BL.toChunks
 
 -- | looped socket JSON decoder
+socketDecoder :: A.FromJSON a => Socket-> (a -> IO ()) -> IO ()
 socketDecoder sock f = loop Nothing Nothing
   where 
     loop mpartial mbytes = do
         bytes <- maybe (recv sock 4096) return mbytes
-        unless (B.null bytes) $
+        unless (B.null bytes) $ -- null recv indicates closed connection
           case maybe (PB.parse A.json') PB.feed mpartial bytes of
-            PB.Fail _ _ reason -> do
-                putStrLn reason -- log the error
-                loop Nothing Nothing
-            k@PB.Partial{}     -> loop (Just k) Nothing
-            PB.Done _bytes' c   -> do
+            PB.Fail _ _ _reason -> loop Nothing Nothing
+            k@PB.Partial{}      -> loop (Just k) Nothing
+            PB.Done bytes' c    -> do
                 case A.fromJSON c of
                   A.Success a -> f a
                   _           -> return ()
-                -- loop Nothing (Just bytes')
-                loop Nothing Nothing
+                loop Nothing $ if B.null bytes' 
+                                 then Nothing 
+                                 else Just bytes'

@@ -16,9 +16,10 @@ import Snap.Http.Server
 import Snap.Util.FileServe
 import System.FilePath
 
+import Network.Socket (Socket)
 import Network.Socket.ByteString (recv, sendAll)
 
-import Control.Proxy.TCP
+import TCP
 
 --import Control.Monad
 import Control.Concurrent.MVar
@@ -149,22 +150,22 @@ runSocketServer env =
     cleanup _ = return ()
         
 -- | looped socket JSON decoder
+socketDecoder :: A.FromJSON a => Socket-> (a -> IO ()) -> IO ()
 socketDecoder sock f = loop Nothing Nothing
   where 
     loop mpartial mbytes = do
         bytes <- maybe (recv sock 4096) return mbytes
-        unless (B.null bytes) $ 
+        unless (B.null bytes) $ -- null recv indicates closed connection
           case maybe (PB.parse A.json') PB.feed mpartial bytes of
-            PB.Fail _ _ reason -> do
-                putStrLn reason -- log the error
-                loop Nothing Nothing
-            k@PB.Partial{}     -> loop (Just k) Nothing
-            PB.Done _bytes' c   -> do
+            PB.Fail _ _ _reason -> loop Nothing Nothing
+            k@PB.Partial{}      -> loop (Just k) Nothing
+            PB.Done bytes' c    -> do
                 case A.fromJSON c of
                   A.Success a -> f a
                   _           -> return ()
-                -- loop Nothing (Just ytes',
-                loop Nothing Nothing
+                loop Nothing $ if B.null bytes' 
+                                 then Nothing 
+                                 else Just bytes'
 
 -------------------------------------------------------------------------------
 -- Main
