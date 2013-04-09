@@ -16,14 +16,16 @@ import Snap.Http.Server
 import Snap.Util.FileServe
 import System.FilePath
 
--- import Control.Proxy
--- import Control.Proxy.TCP
+import Control.Proxy
+import Control.Proxy.TCP
+import Network.Socket.ByteString.Lazy (sendAll)
 
 --import Control.Monad
+import Control.Concurrent.MVar
 import Control.Monad.IO.Class
-import Control.Concurrent.STM
 import Control.Applicative
--- import Control.Concurrent (forkIO)
+import Control.Concurrent (forkIO, killThread)
+import Control.Exception (finally)
 
 import qualified Network.WebSockets as WS
 import Network.WebSockets.Snap
@@ -31,6 +33,7 @@ import Network.WebSockets.Snap
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Text.Encoding (decodeUtf8)
+import qualified Data.IxSet as Ix
 
 import qualified Data.HashMap.Strict as M
 import qualified Data.ByteString.Char8 as B
@@ -55,6 +58,7 @@ mkResponse p (OK v _)  = p { pPayload = Just v }
 
 runPacket env = do
     res <- dispatch env
+    notify env res
     return . Just $ mkResponse (pPacket env) res
    
 dispatch PacketEnv{..} = dispatch' pEndpoint pAction
@@ -63,16 +67,17 @@ dispatch PacketEnv{..} = dispatch' pEndpoint pAction
     ServerEnv{..} = pServerEnv
 
     -- Object commands
-    dispatch' ["o", oid] "create"     = atomically $ createObject oid pPayload sObjects
-    dispatch' ["o", oid] "get"        = atomically $ getObject oid sObjects
-    dispatch' ["o", oid] "set"        = atomically $ mergeObject oid pPayload sObjects
-    dispatch' ["o", oid] "inc"        = atomically $ incObject oid pPayload sObjects
+    dispatch' ["o", oid] "create"     = createObject oid pPayload sObjects
+    dispatch' ["o", oid] "get"        = getObject oid sObjects
+    dispatch' ["o", oid] "set"        = mergeObject oid pPayload sObjects
+    dispatch' ["o", oid] "inc"        = incObject oid pPayload sObjects
+    dispatch' ["o"]      "sub"        = subObjects pClient sSubs
 
     -- User commands
-    dispatch' ["u"]      "get"        = atomically $ getUsers sUsers
-    dispatch' ["u", uid] "connect"    = atomically $ connectUser uid pClient sUsers
-    dispatch' ["u", uid] "disconnect" = atomically $ disconnectUser uid sUsers
-    dispatch' ["u", uid] "msg"        = atomically $ msgUser uid pPayload sUsers
+    dispatch' ["u"]      "get"        = getUsers sUsers
+    dispatch' ["u", uid] "connect"    = connectUser uid pClient sUsers
+    dispatch' ["u", uid] "disconnect" = disconnectUser uid sUsers
+    dispatch' ["u", uid] "msg"        = msgUser uid pPayload sUsers
 
     -- File commands
     dispatch' ("f":p)    "get"        = listFiles p
@@ -90,12 +95,12 @@ webAPI env = do
                               <*> return action
                               <*> (parsePayload  <$> readRequestBody 4096)
                               <*> return Nothing
-    mpacket <- liftIO $ runPacket $ PacketEnv env HTTPClient packet
-    respond mpacket
+    mpacket <- liftIO $ runPacket $ PacketEnv env httpClient packet
+    respond' mpacket
   where
     parseEndpoint = map T.pack . splitDirectories
     parsePayload bs = decodeStrictValue $ toStrict bs
-    respond = writeJSON . fromJust
+    respond' = writeJSON . fromJust
 
 parseAction :: Snap Text
 parseAction = do
@@ -125,39 +130,46 @@ wsAPI env rq = do
         case decodeStrict n of
           Nothing -> return () -- discard bad packet
           Just p  -> do
-              mpacket <- liftIO $ runPacket $ PacketEnv env HTTPClient p
+              mpacket <- liftIO $ runPacket $ PacketEnv env httpClient p
               WS.sendTextData . encode . fromJust $ mpacket
         go
 
 -------------------------------------------------------------------------------
 -- Socket API
 
-
-{-
-socketAPI = do
-    forkIO $ serveFork (Host "127.0.0.1") "9000" $ \(sock, _remoteAddr) ->
-      flip finally (cleanup sock) $
+runSocketServer env =
+    serveFork (Host "127.0.0.1") "8001" $ \(sock, _remoteAddr) ->
+      flip finally (cleanup sock) $ do
+          connectUser "socket" (client sock) (sUsers env)
+          subObjects (client sock) (sSubs env)
           runProxy $ socketReadS 4096 sock 
-              >-> decoder (get :: Get ModRequestFrame)
-              >-> processModRequests sock trans usage
-              >-> chanWriterD chan
+              >-> decoder
+              >-> useD (handlePacket sock)
   where
-    cleanup sock = return ()
+    client sock = Client "socket" $ SocketClient sock
+    cleanup _ = return ()
+    handlePacket sock p = do
+        mpacket <- runPacket $ 
+            PacketEnv env (Client "socket" $ SocketClient sock) p
+        sendAll sock . A.encode . fromJust $ mpacket
+        
+    
 
-decoder :: (Proxy p, Serialize a) => Get a -> () -> Pipe p B.ByteString a IO r
-decoder g () = runIdentityP $ loop Nothing Nothing
+decoder :: (Proxy p, A.FromJSON a) => () -> Pipe p B.ByteString a IO r
+decoder () = runIdentityP $ loop Nothing Nothing
   where
     loop mpartial mbytes = do
         bytes <- maybe (request ()) return mbytes
-        case fromMaybe (runGetPartial g) mpartial bytes of
-          Fail reason -> do
+        case maybe (PB.parse A.json') PB.feed mpartial bytes of
+          PB.Fail _ _ reason -> do
               lift $ putStrLn reason -- log the error
               loop Nothing Nothing
-          Partial k   -> loop (Just k) Nothing
-          Done c bytes' -> do
-              respond c
+          k@PB.Partial{}     -> loop (Just k) Nothing
+          PB.Done bytes' c   -> do
+              case A.fromJSON c of
+                A.Success a -> respond a
+                _           -> return ()
               loop Nothing (Just bytes')
--}
 
 -------------------------------------------------------------------------------
 -- Main
@@ -184,8 +196,14 @@ runWebServer env = httpServe config (route routes) where
 
 main :: IO ()
 main = do
-    env <- ServerEnv <$> newTVarIO M.empty <*> newTVarIO M.empty
-    runWebServer env
+    env <- ServerEnv <$> newMVar M.empty
+                     <*> newMVar M.empty 
+                     <*> newMVar Ix.empty
+    tid1 <- forkIO $ runWebServer env
+    tid2 <- forkIO $ runSocketServer env
+    getLine
+    killThread tid1
+    killThread tid2
 
 
 -------------------------------------------------------------------------------
