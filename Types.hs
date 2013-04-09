@@ -4,45 +4,45 @@ module Types where
 
 import Control.Applicative
 import Control.Monad
-import Control.Monad.Reader
 import Control.Concurrent.STM
 
 import Network.Socket (Socket)
-import Network.WebSockets (Sink, TextProtocol, Hybi10)
+import Network.WebSockets (WebSockets, Sink, TextProtocol, Hybi00)
 
 import Data.HashMap.Strict (HashMap)
 import Data.Text (Text)
 import qualified Data.Text as T
-import Data.Aeson (Value(..), object, ToJSON(..), FromJSON(..), (.=), (.:?), (.:))
+import Data.Aeson (Object, Value(..), object, ToJSON(..), FromJSON(..), (.=), (.:?), (.:))
 -- import Data.Attoparsec.Text
 import Data.Monoid
+import Data.Maybe (fromMaybe)
 
 type ObjectId = Text
 type UserId   = Text
 
 type UserMap = HashMap UserId Client
+type ObjectMap = HashMap ObjectId Object
 
-data Env = Env
-  { eUsers :: TVar UserMap
-  -- current packet
-  -- current client
+data ServerEnv = ServerEnv
+  { sUsers :: TVar UserMap
+  , sObjects :: TVar ObjectMap
   }
 
-type DispatchEnv = (Env, Client, Packet)
+-- ServerEnv plus current Client and Packet
+data PacketEnv = PacketEnv 
+  { pServerEnv :: ServerEnv
+  , pClient    :: Client
+  , pPacket    :: Packet
+  }
 
-newtype NGON a = NGON 
-  { runN :: ReaderT DispatchEnv IO a } 
-  deriving (Monad, MonadIO, MonadReader DispatchEnv)
-
-runNGON :: DispatchEnv -> NGON a -> IO a
-runNGON denv k = runReaderT (runN k) denv
+type WS = WebSockets Hybi00
 
 instance TextProtocol p => Show (Sink p) where
   show _ = "<Sink>"
 
 data Client 
   = SocketClient Socket 
-  | WebSocketClient (Sink Hybi10) 
+  | WebSocketClient (Sink Hybi00) 
   | HTTPClient
     deriving (Show, Eq)
 
@@ -55,6 +55,7 @@ instance ToJSON Client where
 data Packet = Packet
     { pId       :: Maybe Integer
     , pEndpoint :: [EndpointComponent]
+    , pAction   :: Text
     , pPayload  :: Maybe Value
     , pError    :: Maybe Value
     } deriving (Show, Eq)
@@ -62,18 +63,28 @@ data Packet = Packet
 
 type EndpointComponent = Text
 
-
 instance FromJSON Packet where
-  parseJSON (Object o) = Packet <$> o .:? "id"
-                                <*> (map T.strip . T.split (=='/') <$> o .: "e")
-                                <*> o .:? "p"
-                                <*> o .:? "err"
+  -- parseJSON (Object o) = Packet <$> o .:? "id"
+                                -- <*> (map T.strip . T.split (=='/') <$> o .: "e")
+                                -- <*> o .:? "p"
+                                -- <*> o .:? "err"
+  parseJSON (Object o) = do
+      id' <- o .:? "id"
+      e   <- map T.strip . T.split (=='/') <$> o .: "e" 
+      a   <- (T.toLower <$>) <$> o .:? "a"
+      p   <- o .:? "p"
+      err <- o .:? "err"
+      let defaultAction = case p of
+                            Nothing -> "get"
+                            _       -> "set"
+      return $ Packet id' e (fromMaybe defaultAction a) p err 
   parseJSON _ = mzero
 
 instance ToJSON Packet where
   toJSON Packet{..} = object $ mconcat 
     [ maybeField "id" pId
-    , ["e" .= pEndpoint]
+    , ["e" .= T.intercalate "/" pEndpoint]
+    , ["a" .= pAction]
     , maybeField "p" pPayload
     , maybeField "err" pError
     ]
@@ -91,11 +102,13 @@ endpointComponents = many1 $ char '/' *> component <|> component
 isOKResult (OK _ _) = True
 isOKResult _        = False
 
-data Result = OK Value NotificationType | Error Value deriving (Show, Eq)
+data Result = OK Value Notifications | Error Value deriving (Show, Eq)
 
-data NotificationType = NoNotification
-                      | ObjectUpdated ObjectId
-                      | UserMessage UserId Value
-                      | UserDisconnected UserId
-                      | UserConnected UserId
-                        deriving (Show, Eq)
+data Notifications = NoNotifications
+                   | ObjectUpdated ObjectId
+                   | ObjectCreated ObjectId
+                   | UserMessage UserId Value
+                   | UserDisconnected UserId
+                   | UserConnected UserId
+                   | FileDeleted FilePath
+                     deriving (Show, Eq)

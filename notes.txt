@@ -1,3 +1,31 @@
+File uploads
+
+- specify a child path when uploading
+- subscribe to events at a specific folder
+
+ex: post to uploads/foo/bar
+
+
+-------------------------------------------------------------------------------
+
+PROBLEM: how to handle actions that change the subscriber list but ALSO need to
+send notifications, such as deleting an object, which would delete
+subscriptions on that object but should also send notifications. With the
+current system, the subs would be deleted already by the time the notifications
+are sent.
+
+- MVars instead of TVars would allow IO during the modify...
+- but how to handle linked changes like deleting an object which would:
+  - delete the object from the object map
+  - delete object subs from the sub map
+  ... if you delete the object first you should be fine I think
+  - actually you want it that way:
+    1 delete object
+    2 (notifications are sent)
+    3 delete subs
+
+
+
 Processing a packet
 
 data needed:
@@ -17,6 +45,7 @@ data needed:
     - if lock ok
       - modify object
         return: OK (A.Bool True) (ObjectUpdated ObjectId)
+
 
 
 
@@ -70,3 +99,43 @@ users:
 HTTP:
 - all of the above endpoints work as URLS (except subscriptions and ident)
 action method
+
+
+-------------------------------------------------------------------------------
+API: action method
+
+objects:
+  - create       -> [o]bjects/foo          {a:create, p:{x:0,y:0}}
+  - delete       -> [o]bjects/foo          {a:delete}
+  - get          -> [o]bjects/foo          a:get is default when no p
+  - set          -> [o]bjects/foo          a:set is default when p
+  - inc          -> [o]bjects/foo          {a:inc, p:{x:1}}
+  - lock         -> [o]bjects/foo          {a:lock}
+  - unlock       -> [o]bjects/foo          {a:unlock}
+  - sub          -> [o]bjects/foo          {a:sub}
+  - unsub        -> [o]bjects/foo          {a:unsub}
+
+users:
+  - connect      -> [u]sers/jason          {a:connect}
+  - disconnect   -> [u]sers/jason          {a:disconnect}
+  - msg          -> [u]sers/jason          {a:msg, p:...}
+  - get          -> [u]sers                default
+  - sub          -> [u]sers                {a:sub}
+  - unsub        -> [u]sers                {a:unsub}
+
+files:
+  - delete       -> [f]iles/foo/b/baz.jpg  {a:delete}
+  - sub          -> [f]iles/foo/b          {a:sub}
+  - unsub        -> [f]iles/foo/b          {a:unsub}
+
+
+HTTP:
+- can specify action with ?a=
+- can specify payload with ?p=
+- POST/PUT = set
+- GET = get
+- DELETE = delete
+
+
+
+
