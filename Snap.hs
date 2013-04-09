@@ -16,13 +16,14 @@ import Snap.Http.Server
 import Snap.Util.FileServe
 import System.FilePath
 
-import Control.Proxy
+import Network.Socket.ByteString (recv, sendAll)
+
 import Control.Proxy.TCP
-import Network.Socket.ByteString.Lazy (sendAll)
 
 --import Control.Monad
 import Control.Concurrent.MVar
 import Control.Monad.IO.Class
+import Control.Monad
 import Control.Applicative
 import Control.Concurrent (forkIO, killThread)
 import Control.Exception (finally)
@@ -139,37 +140,31 @@ wsAPI env rq = do
 
 runSocketServer env =
     serveFork (Host "127.0.0.1") "8001" $ \(sock, _remoteAddr) ->
-      flip finally (cleanup sock) $ do
-          connectUser "socket" (client sock) (sUsers env)
-          subObjects (client sock) (sSubs env)
-          runProxy $ socketReadS 4096 sock 
-              >-> decoder
-              >-> useD (handlePacket sock)
+      flip finally (cleanup sock) $ 
+          socketDecoder sock $ \p -> do
+              mpacket <- runPacket $ PacketEnv env (client sock) p
+              sendAll sock . toStrict . A.encode . fromJust $ mpacket
   where
     client sock = Client "socket" $ SocketClient sock
     cleanup _ = return ()
-    handlePacket sock p = do
-        mpacket <- runPacket $ 
-            PacketEnv env (Client "socket" $ SocketClient sock) p
-        sendAll sock . A.encode . fromJust $ mpacket
         
-    
-
-decoder :: (Proxy p, A.FromJSON a) => () -> Pipe p B.ByteString a IO r
-decoder () = runIdentityP $ loop Nothing Nothing
-  where
+-- | looped socket JSON decoder
+socketDecoder sock f = loop Nothing Nothing
+  where 
     loop mpartial mbytes = do
-        bytes <- maybe (request ()) return mbytes
-        case maybe (PB.parse A.json') PB.feed mpartial bytes of
-          PB.Fail _ _ reason -> do
-              lift $ putStrLn reason -- log the error
-              loop Nothing Nothing
-          k@PB.Partial{}     -> loop (Just k) Nothing
-          PB.Done bytes' c   -> do
-              case A.fromJSON c of
-                A.Success a -> respond a
-                _           -> return ()
-              loop Nothing (Just bytes')
+        bytes <- maybe (recv sock 4096) return mbytes
+        unless (B.null bytes) $ 
+          case maybe (PB.parse A.json') PB.feed mpartial bytes of
+            PB.Fail _ _ reason -> do
+                putStrLn reason -- log the error
+                loop Nothing Nothing
+            k@PB.Partial{}     -> loop (Just k) Nothing
+            PB.Done _bytes' c   -> do
+                case A.fromJSON c of
+                  A.Success a -> f a
+                  _           -> return ()
+                -- loop Nothing (Just ytes',
+                loop Nothing Nothing
 
 -------------------------------------------------------------------------------
 -- Main
