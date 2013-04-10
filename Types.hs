@@ -121,7 +121,6 @@ data Notifications
   | ObjectUpdated ObjectId
   | ObjectCreated ObjectId
   | ObjectDeleted ObjectId
-  | UserMessage UserId Value
   | UserDisconnected UserId
   | UserConnected UserId
   | FileDeleted FilePath

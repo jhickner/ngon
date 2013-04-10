@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings, RecordWildCards #-}
 
 -- send notification on socket and websocket disconnect
--- initial connect-only handler  
+-- cleanup client on disconnect
 -- unsub
 
 -- can't do uploads and stuff from elm (fay?)
@@ -53,13 +53,32 @@ import Data.Aeson (encode)
 
 import Data.Maybe (isJust, fromJust)
 
-
 import Types
 import Actions
+
 
 mkResponse :: Packet -> Result -> Packet
 mkResponse p (Error v) = p { pPayload = Nothing, pError = Just v }
 mkResponse p (OK _ v)  = p { pPayload = Just v }
+
+addError :: Text -> Packet -> Packet
+addError err p = p { pError = Just $ A.String err }
+
+runConnectPacket :: ServerEnv -> ClientHandle -> Packet -> IO (Maybe Client)
+runConnectPacket env chandle p@Packet{..} =
+    case pEndpoint of
+        ["u", uid] -> do
+            let client = Client uid chandle
+            ok <- connectUser client (sUsers env)
+            if ok
+              then return $ Just client
+              else do
+                  sendPacket client $ addError "That user id is already connected" p
+                  return Nothing
+        _          -> do
+            let client = Client "unknown" chandle
+            sendPacket client $ addError "Connect first" p
+            return Nothing
 
 runPacket :: PacketEnv -> IO (Maybe Packet)
 runPacket env = do
@@ -70,7 +89,7 @@ runPacket env = do
       else Nothing
   where p = pPacket env
         shouldRespond = isJust . pId
-   
+
 dispatch :: PacketEnv -> IO Result
 dispatch env@PacketEnv{..} = d pEndpoint pAction
   where
@@ -147,55 +166,61 @@ parseAction = do
 wsAPI :: ServerEnv -> WS.Request -> WS ()
 wsAPI env rq = do
     WS.acceptRequest rq
-    go
-  where
-    go = do
+    sink <- WS.getSink
+    client <- webSocketDecoder $ runConnectPacket env (WebSocketClient sink)
+    webSocketDecoder $ \p -> do
+        mrpacket <- runPacket $ PacketEnv env client p
+        maybe (return ()) (WS.sendSink sink . WS.textData . encode) mrpacket
+        return Nothing
+
+-- | loop parsing JSON as long as action returns Nothing
+webSocketDecoder :: A.FromJSON a => (a -> IO (Maybe b)) -> WS b
+webSocketDecoder action = loop
+  where 
+    loop = do
         n <- WS.receiveData :: WS B.ByteString
         case decodeStrict n of
-          Nothing -> return () -- discard bad packet
+          Nothing -> loop
           Just p  -> do
-              mrpacket <- liftIO $ runPacket $ PacketEnv env httpClient p
-              maybe (return ()) (WS.sendTextData . encode) mrpacket
-        go
+              res <- liftIO $ action p
+              case res of
+                Nothing -> loop
+                Just b  -> return b
+              
 
 -------------------------------------------------------------------------------
 -- Socket API
 
-runConnectPacket :: ServerEnv -> ClientHandle -> Packet -> IO (Maybe Client)
-runConnectPacket env chandle Packet{..} =
-    case pEndpoint of
-        ["u", uid] -> connectUser (Client uid chandle) (sUsers env)
-        _          -> return Nothing
-    
-
-
 runSocketServer env =
     serveFork (Host "127.0.0.1") "8001" $ \(sock, _remoteAddr) -> do
-        client <- socketDecoder sock $ runConnectPacket env (SocketClient sock)
-        flip finally (cleanup client) $ 
-            void $ socketDecoder sock $ \p -> do
-                mrpacket <- runPacket $ PacketEnv env client p
-                maybe (return ()) (sendAll sock . toStrict . encode) mrpacket
-                return Nothing
+        mclient <- socketDecoder sock $ runConnectPacket env (SocketClient sock)
+        case mclient of
+          Nothing     -> return () -- disconnected
+          Just client -> flip finally (cleanup env client) $ 
+              void $ socketDecoder sock $ \p -> do
+                  mrpacket <- runPacket $ PacketEnv env client p
+                  maybe (return ()) (sendAll sock . toStrict . encode) mrpacket
+                  return Nothing
   where
-    cleanup _ = return ()
+    cleanup _ _ = return ()
         
--- | looped socket JSON decoder
-socketDecoder :: A.FromJSON a => Socket-> (a -> IO (Maybe Client)) -> IO (Maybe Client)
-socketDecoder sock f = loop Nothing Nothing
+-- | loop parsing JSON as long as action returns Nothing
+socketDecoder :: A.FromJSON a => Socket-> (a -> IO (Maybe b)) -> IO (Maybe b)
+socketDecoder sock action = loop Nothing Nothing
   where 
     loop mpartial mbytes = do
         bytes <- maybe (recv sock 4096) return mbytes
-        unless (B.null bytes) $ -- null recv indicates closed connection
-          case maybe (PB.parse A.json') PB.feed mpartial bytes of
+        if B.null bytes
+          then return Nothing
+          else case maybe (PB.parse A.json') PB.feed mpartial bytes of
             PB.Fail _ _ _reason -> loop Nothing Nothing
             k@PB.Partial{}      -> loop (Just k) Nothing
             PB.Done bytes' v    -> do
-                mclient <- case A.fromJSON v of
-                             A.Success a -> f a
+                mb <- case A.fromJSON v of
+                             A.Success a -> action a
                              _           -> return Nothing
-                case mclient of
-                  Just client  -> return client
+                case mb of
+                  Just b  -> return $ Just b
                   Nothing -> loop Nothing $ if B.null bytes' 
                                               then Nothing 
                                               else Just bytes'

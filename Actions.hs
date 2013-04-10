@@ -10,6 +10,7 @@ import Control.Concurrent.MVar
 import Control.Applicative
 import Control.Monad
 
+import qualified Network.WebSockets as WS
 import Network.Socket.ByteString.Lazy (sendAll)
 
 import Data.Text (Text)
@@ -25,8 +26,6 @@ import Data.List (foldl')
 import Data.Monoid ((<>))
 import Data.Maybe (mapMaybe)
 import Types
-
-import Debug.Trace
 
 true :: A.Value
 true = A.Bool True
@@ -49,13 +48,6 @@ maybeResult err m = do
 
 -------------------------------------------------------------------------------
 -- Subscriptions
-
--- file subs: FilePath
--- object subs: ObjectId
--- object subs: All Objects
--- user subs: All Users
-
-tap x = traceShow x x
 
 notify :: PacketEnv -> Result -> IO ()
 notify PacketEnv{..} res =
@@ -84,6 +76,8 @@ getSubs ServerEnv{..} sts = do
 
 sendPacket :: Client -> Packet -> IO ()
 sendPacket (Client _ (SocketClient s)) p = sendAll s . A.encode $ p
+sendPacket (Client _ (WebSocketClient s)) p = 
+    WS.sendSink s . WS.textData $ A.encode p
 sendPacket _ _ = return ()
 
 
@@ -240,12 +234,12 @@ deleteFile fp = handle ioErrorResult $ do
 -------------------------------------------------------------------------------
 -- USERS
 
-connectUser :: Client -> MVar UserMap -> IO (Maybe Client)
+connectUser :: Client -> MVar UserMap -> IO Bool
 connectUser client@Client{..} umap =
     modifyMVar umap $ \m ->
       return $ case M.lookup cUserId m of
-        Nothing -> (M.insert cUserId client m, Just client)
-        Just _  -> (m, Nothing) 
+        Nothing -> (M.insert cUserId client m, True)
+        Just _  -> (m, False) 
 
 disconnectUser :: UserId -> MVar UserMap -> IO Result
 disconnectUser uid umap = do
