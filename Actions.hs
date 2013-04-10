@@ -37,6 +37,16 @@ errorResult = Error . A.String
 ioErrorResult :: Monad m => IOException -> m Result
 ioErrorResult = return . Error . A.String . T.pack . show
 
+ioE :: Monad m => m a -> IOException -> m a
+ioE f _ = f 
+
+maybeResult :: (A.ToJSON a) => Text -> IO (Maybe a) -> IO Result
+maybeResult err m = do
+  r <- m
+  return $ case r of
+    Nothing -> errorResult err
+    Just x  -> OK NoNotifications (A.toJSON x)
+
 -------------------------------------------------------------------------------
 -- Subscriptions
 
@@ -47,33 +57,72 @@ ioErrorResult = return . Error . A.String . T.pack . show
 
 tap x = traceShow x x
 
-sendPacket :: Packet -> Client -> IO ()
-sendPacket p (Client _ (SocketClient s)) = sendAll s . A.encode $ p
-sendPacket _ _ = return ()
-
--- potential STM use here between subs and user map
 notify :: PacketEnv -> Result -> IO ()
 notify PacketEnv{..} res =
     case res of
       Error{} -> return ()
-      (OK _ n) -> do
-        subs' <- readMVar (sSubs pServerEnv)
-        umap' <- readMVar (sUsers pServerEnv)
-        mapM_ (sendPacket $ pPacket { pId = Nothing }) $ clients subs' umap' n
+      (OK n _) -> case n of
+        ObjectCreated _   -> send' [AllObjectsSub]
+        ObjectUpdated oid -> send' [AllObjectsSub, ObjectSub oid]
+        ObjectDeleted oid -> send' [AllObjectsSub, ObjectSub oid]
+        FileDeleted fp    -> send' [FileSub $ takeDirectory fp]
+        _ -> return ()
   where
-    clients subs' umap' n = lookup' $ case n of
-        ObjectCreated _   -> [AllObjectsSub]
-        ObjectUpdated oid -> [AllObjectsSub, ObjectSub oid]
-        _ -> []
-      where 
-        lookup' = mapMaybe ((`M.lookup` umap') . sUserId) . Ix.toList . (subs' @+) 
+    send' = sendNotifications pServerEnv (pPacket { pId = Nothing })
+
+sendNotifications :: ServerEnv -> Packet -> [SubType] -> IO ()
+sendNotifications env p sts = do
+    clients <- getSubs env sts
+    mapM_ (`sendPacket` p) clients
+
+-- potential STM use here between subs and user map
+getSubs :: ServerEnv -> [SubType] -> IO [Client]
+getSubs ServerEnv{..} sts = do
+    subs' <- readMVar sSubs
+    umap' <- readMVar sUsers
+    return $ mapMaybe ((`M.lookup` umap') . sUserId) . Ix.toList $ subs' @+ sts
+
+sendPacket :: Client -> Packet -> IO ()
+sendPacket (Client _ (SocketClient s)) p = sendAll s . A.encode $ p
+sendPacket _ _ = return ()
 
 
-subObjects :: Client -> MVar SubSet -> IO Result
-subObjects client subs = do
-    modifyMVar_ subs $ \s -> return $
-        Ix.insert (SubEntry (cUserId client) AllObjectsSub) s
-    return $ OK true NoNotifications
+-------------------------------------------------------------------------------
+-- Subscriptions
+
+addSub :: PacketEnv -> SubType -> IO Result
+addSub env@PacketEnv{..} st = do
+    sendInitialUpdate env st
+    modifyMVar_ sSubs $ \s -> return $
+        Ix.insert (SubEntry (cUserId pClient) st) s
+    return $ OK NoNotifications true
+  where
+    ServerEnv{..} = pServerEnv
+
+sendInitialUpdate :: PacketEnv -> SubType -> IO ()
+sendInitialUpdate PacketEnv{..} st =
+    case st of
+      AllUsersSub -> do
+        uids <- getUsers sUsers
+        forM_ uids $ \u -> sendPacket pClient $ 
+            Packet Nothing ["u",u] "connect" Nothing Nothing
+      AllObjectsSub -> do
+        oids <- getObjects sObjects
+        forM_ oids $ \oid -> sendObj oid 
+      ObjectSub oid -> sendObj oid 
+      FileSub fp -> do
+        files <- listFiles fp
+        forM_ files $ \f -> sendPacket pClient $
+            Packet Nothing (fpToEndpoint $ fp </> f) "create" Nothing Nothing
+  where
+    ServerEnv{..} = pServerEnv
+    sendObj oid = do
+        obj <- getObject oid sObjects 
+        case obj of
+          Nothing -> return () -- object doesn't exist yet
+          _ -> sendPacket pClient $ 
+              Packet Nothing ["o",oid] "create" (A.toJSON <$> obj) Nothing
+
 
 
 -------------------------------------------------------------------------------
@@ -83,17 +132,16 @@ createObject :: ObjectId -> Maybe A.Value -> MVar ObjectMap -> IO Result
 createObject oid (Just (A.Object o)) omap =
     modifyMVar omap $ \m ->
         return $ case M.lookup oid m of
-          Nothing -> (M.insert oid o m, OK (A.toJSON o) $ ObjectCreated oid)
+          Nothing -> (M.insert oid o m, OK (ObjectCreated oid) (A.toJSON o))
           Just _  -> (m, errorResult "That object id already exists")
 createObject _ _ _ = return $ errorResult "The initial value must be an object"
   
-getObject :: ObjectId -> MVar ObjectMap -> IO Result
-getObject oid omap = do
-    obj <- M.lookup oid <$> readMVar omap
-    return $ case obj of
-      Nothing -> errorResult "No such object id"
-      Just o  -> OK (A.Object o) NoNotifications
-     
+getObject :: ObjectId -> MVar ObjectMap -> IO (Maybe A.Object)
+getObject oid omap = M.lookup oid <$> readMVar omap
+
+getObjects :: MVar ObjectMap -> IO [ObjectId]
+getObjects omap = M.keys <$> readMVar omap
+
 getObjectProp :: ObjectId -> Text -> MVar ObjectMap -> IO Result
 getObjectProp oid prop omap = do
     obj <- M.lookup oid <$> readMVar omap
@@ -101,7 +149,7 @@ getObjectProp oid prop omap = do
       Nothing -> errorResult "No such object id"
       Just o  -> case M.lookup prop o of
         Nothing -> errorResult "No such key in object"
-        Just v  -> OK (A.toJSON v) NoNotifications
+        Just v  -> OK NoNotifications (A.toJSON v) 
 
 incObjectProp :: ObjectId -> Text -> Maybe A.Value -> MVar ObjectMap -> IO Result
 incObjectProp oid prop (Just v) omap =
@@ -113,7 +161,7 @@ incObjectProp oid prop (Just v) omap =
           Just v' -> case incValue v' v of
             Nothing  -> (m, errorResult "Invalid increment")
             Just v'' -> (M.insert oid (M.insert prop v'' o') m, 
-                         OK v'' $ ObjectUpdated oid)
+                         OK (ObjectUpdated oid) v'')
 incObjectProp _ _ _ _ = return $ errorResult "Nothing to inc"
 
 setObjectProp :: ObjectId -> Text -> Maybe A.Value -> MVar ObjectMap -> IO Result
@@ -121,18 +169,18 @@ setObjectProp oid prop (Just v) omap =
     modifyMVar omap $ \m ->
       return $ case M.lookup oid m of
         Nothing -> (m, errorResult "No such object id")
-        Just o' -> (M.insert oid (M.insert prop v o') m, OK v $ ObjectUpdated oid)
+        Just o' -> (M.insert oid (M.insert prop v o') m, OK (ObjectUpdated oid) v)
 setObjectProp _ _ _ _ = return $ errorResult "Nothing to set"
+
 -- delete object
 -- send deleted notification
 -- delete object subs (should notifications handle this?)
-
 deleteObject :: ObjectId -> MVar ObjectMap -> IO Result
 deleteObject oid omap =
     modifyMVar omap $ \m ->
       return $ case M.lookup oid m of
         Nothing -> (m, errorResult "No such object id") 
-        Just _  -> (M.delete oid m, OK true $ ObjectDeleted oid)
+        Just _  -> (M.delete oid m, OK (ObjectDeleted oid) true)
 
 mergeObject :: ObjectId -> Maybe A.Value -> MVar ObjectMap -> IO Result
 mergeObject oid (Just (A.Object o)) omap =
@@ -140,7 +188,7 @@ mergeObject oid (Just (A.Object o)) omap =
       return $ case M.lookup oid m of
         Nothing -> (m, errorResult "No such object id")
         Just o' -> let new = o <> o' in
-          (M.insert oid new m, OK (A.toJSON new) $ ObjectUpdated oid)
+          (M.insert oid new m, OK (ObjectUpdated oid) (A.toJSON new))
 mergeObject _ _ _ = return $ errorResult "The value must be an object"
 
 incObject :: ObjectId -> Maybe A.Value -> MVar ObjectMap -> IO Result
@@ -152,7 +200,7 @@ incObject oid (Just (A.Object o)) omap =
           case updates o' of
             Nothing  -> (m, errorResult "Invalid increment")
             Just kvs -> let new = foldl' insert o' kvs in
-                (M.insert oid new m, OK (A.toJSON new) $ ObjectUpdated oid)
+                (M.insert oid new m, OK (ObjectUpdated oid) (A.toJSON new))
   where
     updates m = mapM (inc m) $ M.toList o
     inc m (k,v) = (,) k <$> join (flip incValue v <$> M.lookup k m)
@@ -170,41 +218,34 @@ incValue _ _ = Nothing
 -------------------------------------------------------------------------------
 -- Files
 
-root = "files"
+fileRoot = "files"
+
+fpToEndpoint = map T.pack . ("f":) . splitDirectories 
 
 mkPath :: [EndpointComponent] -> FilePath
-mkPath = joinPath . (root :) . map T.unpack
+mkPath = joinPath . map T.unpack
 
-listFiles :: [EndpointComponent] -> IO Result
-listFiles eps = handle ioErrorResult $ do
-    files <- listFiles' $ mkPath eps
-    return $ OK (A.toJSON files) NoNotifications
+listFiles :: FilePath -> IO [String]
+listFiles fp = handle (ioE $ return []) $ listFiles' (fileRoot </> fp)
   where 
     listFiles' path' = 
         getDirectoryContents path' >>= filterM (doesFileExist . combine path')
 
-deleteFile :: [EndpointComponent] -> IO Result
-deleteFile eps = handle ioErrorResult $ do
-    removeFile subpath
-    return $ OK true (FileDeleted subpath)
-  where 
-    subpath = mkPath eps
+deleteFile :: FilePath -> IO Result
+deleteFile fp = handle ioErrorResult $ do
+    removeFile (fileRoot </> fp)
+    return $ OK (FileDeleted fp) true 
 
 
 -------------------------------------------------------------------------------
 -- USERS
 
-connectUser :: UserId -> Client -> MVar UserMap -> IO Result
-connectUser _ (Client _ HTTPClient) _ = 
-    return $ errorResult "HTTP clients do not need to connect."
-connectUser uid client umap = do
-    res <- modifyMVar umap $ \m ->
-      return $ case M.lookup uid m of
-        Nothing -> (M.insert uid client m, True)
-        Just _  -> (m, False) 
-    return $ if res
-      then OK true (UserConnected uid)
-      else errorResult "That user id is already in use."
+connectUser :: Client -> MVar UserMap -> IO (Maybe Client)
+connectUser client@Client{..} umap =
+    modifyMVar umap $ \m ->
+      return $ case M.lookup cUserId m of
+        Nothing -> (M.insert cUserId client m, Just client)
+        Just _  -> (m, Nothing) 
 
 disconnectUser :: UserId -> MVar UserMap -> IO Result
 disconnectUser uid umap = do
@@ -213,13 +254,11 @@ disconnectUser uid umap = do
         Nothing -> (m, False)
         Just _  -> (M.delete uid m, True) 
     return $ if res
-      then OK true (UserDisconnected uid)
+      then OK (UserDisconnected uid) true 
       else errorResult "No such user id"
 
-getUsers :: MVar UserMap -> IO Result
-getUsers umap = do
-    uids <- M.keys <$> readMVar umap
-    return $ OK (A.toJSON uids) NoNotifications
+getUsers :: MVar UserMap -> IO [Text]
+getUsers umap = M.keys <$> readMVar umap
 
 msgUser :: Packet -> UserId -> MVar UserMap -> IO Result
 msgUser p uid umap = do
@@ -228,6 +267,6 @@ msgUser p uid umap = do
       Nothing                    -> return $ errorResult "No such user id."
       Just (Client _ HTTPClient) -> return $ errorResult "Can't message HTTP clients."
       Just client                -> do
-          sendPacket (p { pId = Nothing }) client
-          return $ OK true NoNotifications
+          sendPacket client (p { pId = Nothing })
+          return $ OK NoNotifications true 
       

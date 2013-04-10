@@ -112,7 +112,7 @@ isOKResult (OK _ _) = True
 isOKResult _        = False
 
 data Result 
-  = OK Value Notifications 
+  = OK Notifications Value
   | Error Value 
     deriving (Show, Eq)
 

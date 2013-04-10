@@ -1,8 +1,8 @@
 {-# LANGUAGE OverloadedStrings, RecordWildCards #-}
 
--- address messages to specific clients in order to change session, etc
--- better names for objects so you can getOrCreate "ball", but they're
--- namespaced by instance
+-- send notification on socket and websocket disconnect
+-- initial connect-only handler  
+-- unsub
 
 -- can't do uploads and stuff from elm (fay?)
 -- check out bacon.js
@@ -14,7 +14,12 @@ module Snap where
 import Snap.Core
 import Snap.Http.Server
 import Snap.Util.FileServe
+import Snap.Util.FileUploads
 import System.FilePath
+import System.Directory
+
+import System.Posix.Signals
+import System.Exit (ExitCode(..))
 
 import Network.Socket (Socket)
 import Network.Socket.ByteString (recv, sendAll)
@@ -26,7 +31,7 @@ import Control.Concurrent.MVar
 import Control.Monad.IO.Class
 import Control.Monad
 import Control.Applicative
-import Control.Concurrent (forkIO, killThread)
+import Control.Concurrent
 import Control.Exception (finally)
 
 import qualified Network.WebSockets as WS
@@ -46,50 +51,57 @@ import qualified Data.Aeson.Parser as P
 import qualified Data.Aeson as A
 import Data.Aeson (encode)
 
-import Data.Maybe (fromJust)
+import Data.Maybe (isJust, fromJust)
 
 
 import Types
 import Actions
 
-
-
 mkResponse :: Packet -> Result -> Packet
 mkResponse p (Error v) = p { pPayload = Nothing, pError = Just v }
-mkResponse p (OK v _)  = p { pPayload = Just v }
+mkResponse p (OK _ v)  = p { pPayload = Just v }
 
+runPacket :: PacketEnv -> IO (Maybe Packet)
 runPacket env = do
     res <- dispatch env
     notify env res
-    return . Just $ mkResponse (pPacket env) res
+    return $ if shouldRespond p
+      then Just $ mkResponse p res
+      else Nothing
+  where p = pPacket env
+        shouldRespond = isJust . pId
    
-dispatch PacketEnv{..} = dispatch' pEndpoint pAction
+dispatch :: PacketEnv -> IO Result
+dispatch env@PacketEnv{..} = d pEndpoint pAction
   where
     Packet{..}    = pPacket
     ServerEnv{..} = pServerEnv
 
     -- Object commands
-    dispatch' ["o", oid] "create"     = createObject oid pPayload sObjects
-    dispatch' ["o", oid] "get"        = getObject oid sObjects
-    dispatch' ["o", oid] "set"        = mergeObject oid pPayload sObjects
-    dispatch' ["o", oid, prop] "get"  = getObjectProp oid prop sObjects
-    dispatch' ["o", oid, prop] "set"  = setObjectProp oid prop pPayload sObjects
-    dispatch' ["o", oid, prop] "inc"  = incObjectProp oid prop pPayload sObjects
+    d ["o", oid] "create"     = createObject oid pPayload sObjects
+    d ["o", oid] "get"        = maybeResult "No such object id" $ getObject oid sObjects
+    d ["o", oid] "set"        = mergeObject oid pPayload sObjects
+    d ["o", oid] "inc"        = incObject oid pPayload sObjects
 
-    dispatch' ["o", oid] "inc"        = incObject oid pPayload sObjects
-    dispatch' ["o"]      "sub"        = subObjects pClient sSubs
+    d ["o", oid, prop] "get"  = getObjectProp oid prop sObjects
+    d ["o", oid, prop] "set"  = setObjectProp oid prop pPayload sObjects
+    d ["o", oid, prop] "inc"  = incObjectProp oid prop pPayload sObjects
 
     -- User commands
-    dispatch' ["u"]      "get"        = getUsers sUsers
-    dispatch' ["u", uid] "connect"    = connectUser uid pClient sUsers
-    dispatch' ["u", uid] "disconnect" = disconnectUser uid sUsers
-    dispatch' ["u", uid] "set"        = msgUser pPacket uid sUsers
+    d ["u"]      "get"        = OK NoNotifications . A.toJSON <$> getUsers sUsers
+    d ["u", uid] "set"        = msgUser pPacket uid sUsers
 
     -- File commands
-    dispatch' ("f":p)    "get"        = listFiles p
-    dispatch' ("f":p)    "delete"     = deleteFile p
+    d ("f":p)    "get"        = OK NoNotifications . A.toJSON <$> listFiles (mkPath p)
+    d ("f":p)    "delete"     = deleteFile (mkPath p)
 
-    dispatch' _ _ = return $ Error (A.String "No such endpoint")
+    -- Subscription commands
+    d ["o"]      "sub"        = addSub env AllObjectsSub
+    d ["o", oid] "sub"        = addSub env (ObjectSub oid)
+    d ["u"]      "sub"        = addSub env AllUsersSub
+    d ("f":p)    "sub"        = addSub env (FileSub $ mkPath p)
+
+    d _ _                     = return $ errorResult "No such endpoint"
     
 
 -------------------------------------------------------------------------------
@@ -105,7 +117,6 @@ webAPI env = do
   where
     parseEndpoint = map T.pack . splitDirectories
     respond' = writeJSON . fromJust
-
 
 parsePayload :: Snap (Maybe A.Value)
 parsePayload = do
@@ -143,25 +154,34 @@ wsAPI env rq = do
         case decodeStrict n of
           Nothing -> return () -- discard bad packet
           Just p  -> do
-              mpacket <- liftIO $ runPacket $ PacketEnv env httpClient p
-              WS.sendTextData . encode . fromJust $ mpacket
+              mrpacket <- liftIO $ runPacket $ PacketEnv env httpClient p
+              maybe (return ()) (WS.sendTextData . encode) mrpacket
         go
 
 -------------------------------------------------------------------------------
 -- Socket API
 
+runConnectPacket :: ServerEnv -> ClientHandle -> Packet -> IO (Maybe Client)
+runConnectPacket env chandle Packet{..} =
+    case pEndpoint of
+        ["u", uid] -> connectUser (Client uid chandle) (sUsers env)
+        _          -> return Nothing
+    
+
+
 runSocketServer env =
-    serveFork (Host "127.0.0.1") "8001" $ \(sock, _remoteAddr) ->
-      flip finally (cleanup sock) $ 
-          socketDecoder sock $ \p -> do
-              mpacket <- runPacket $ PacketEnv env (client sock) p
-              sendAll sock . toStrict . A.encode . fromJust $ mpacket
+    serveFork (Host "127.0.0.1") "8001" $ \(sock, _remoteAddr) -> do
+        client <- socketDecoder sock $ runConnectPacket env (SocketClient sock)
+        flip finally (cleanup client) $ 
+            void $ socketDecoder sock $ \p -> do
+                mrpacket <- runPacket $ PacketEnv env client p
+                maybe (return ()) (sendAll sock . toStrict . encode) mrpacket
+                return Nothing
   where
-    client sock = Client "socket" $ SocketClient sock
     cleanup _ = return ()
         
 -- | looped socket JSON decoder
-socketDecoder :: A.FromJSON a => Socket-> (a -> IO ()) -> IO ()
+socketDecoder :: A.FromJSON a => Socket-> (a -> IO (Maybe Client)) -> IO (Maybe Client)
 socketDecoder sock f = loop Nothing Nothing
   where 
     loop mpartial mbytes = do
@@ -170,13 +190,16 @@ socketDecoder sock f = loop Nothing Nothing
           case maybe (PB.parse A.json') PB.feed mpartial bytes of
             PB.Fail _ _ _reason -> loop Nothing Nothing
             k@PB.Partial{}      -> loop (Just k) Nothing
-            PB.Done bytes' c    -> do
-                case A.fromJSON c of
-                  A.Success a -> f a
-                  _           -> return ()
-                loop Nothing $ if B.null bytes' 
-                                 then Nothing 
-                                 else Just bytes'
+            PB.Done bytes' v    -> do
+                mclient <- case A.fromJSON v of
+                             A.Success a -> f a
+                             _           -> return Nothing
+                case mclient of
+                  Just client  -> return client
+                  Nothing -> loop Nothing $ if B.null bytes' 
+                                              then Nothing 
+                                              else Just bytes'
+                  
 
 -------------------------------------------------------------------------------
 -- Main
@@ -197,21 +220,49 @@ runWebServer :: ServerEnv -> IO ()
 runWebServer env = httpServe config (route routes) where
     routes = [ ("/ws", setTimeout 31536000 >> runWebSocketsSnap (wsAPI env))
              , ("/api", webAPI env)
-             , ("/files", serveDirectory "files")
+             , ("/files", handleUploads env)
+             , ("/files", serveDirectory fileRoot)
              , ("/", serveDirectory "static")
              ]
+
+handleUploads :: ServerEnv -> Snap ()
+handleUploads env = method POST $ do
+      tmp <- liftIO getTemporaryDirectory
+      pwd <- liftIO getCurrentDirectory
+      relPath  <- getSafePath
+      let fullPath = pwd </> fileRoot </> relPath
+      liftIO $ createDirectoryIfMissing True fullPath
+      handleFileUploads tmp policy 
+          (const $ allowWithMaximumSize maxSize) $ 
+              mapM_ (handler relPath fullPath)
+  where
+    maxSize = 1024 * 1000 * 100
+    handler relPath fullPath (info, res) = case res of
+        Left _    -> return ()
+        Right tfp -> case partFileName info of  
+            Nothing -> return ()
+            Just fn -> liftIO $ do
+                renameFile tfp (fullPath </> fn')
+                sendNotifications env (fpacket $ relPath </> fn') 
+                  [FileSub relPath]
+              where fn' = B.unpack fn
+    fpacket fp = Packet Nothing (fpToEndpoint fp) "create" Nothing Nothing
+    policy = setMaximumFormInputSize maxSize defaultUploadPolicy
+
 
 main :: IO ()
 main = do
     env <- ServerEnv <$> newMVar M.empty
                      <*> newMVar M.empty 
                      <*> newMVar Ix.empty
-    tid1 <- forkIO $ runWebServer env
-    tid2 <- forkIO $ runSocketServer env
-    getLine
-    killThread tid1
-    killThread tid2
+    t1 <- myThreadId
+    t2 <- forkIO $ runWebServer env
+    t3 <- forkIO $ runSocketServer env
+    installHandler sigINT (Catch $ sigINThandler [t3,t2,t1]) Nothing
+    forever $ threadDelay 1000000
 
+sigINThandler :: [ThreadId] -> IO ()
+sigINThandler = mapM_ (`throwTo` ExitSuccess)
 
 -------------------------------------------------------------------------------
 -- Parsing Utils
