@@ -62,14 +62,14 @@ notify :: PacketEnv -> Result -> IO ()
 notify PacketEnv{..} res =
     case res of
       Error{} -> return ()
-      (OK n _) -> case n of
-        ObjectCreated _   -> send' [AllObjectsSub]
-        ObjectUpdated oid -> send' [AllObjectsSub, ObjectSub oid]
-        ObjectDeleted oid -> send' [AllObjectsSub, ObjectSub oid]
-        FileDeleted fp    -> send' [FileSub $ takeDirectory fp]
+      (OK n p) -> case n of
+        ObjectCreated _   -> send' p [AllObjectsSub]
+        ObjectUpdated oid -> send' p [AllObjectsSub, ObjectSub oid]
+        ObjectDeleted oid -> send' p [AllObjectsSub, ObjectSub oid]
+        FileDeleted fp    -> send' p [FileSub $ takeDirectory fp]
         _ -> return ()
   where
-    send' = sendNotifications pSubs pUsers (pPacket { pId = Nothing })
+    send' p = sendNotifications pSubs pUsers (p { pId = Nothing })
 
 sendNotifications :: MVar SubSet -> MVar UserMap -> Packet -> [SubType] -> IO ()
 sendNotifications subs umap p sts = do
@@ -215,7 +215,11 @@ incObjectProp uid oid prop (Just v) env@PacketEnv{..} =
           Just v' -> case incValue v' v of
             Nothing  -> (m, errorResult pPacket "Invalid increment")
             Just v'' -> (M.insert oid (M.insert prop v'' o) m, 
-                         OK (ObjectUpdated oid) (addP pPacket v''))
+                         OK (ObjectUpdated oid) 
+                         -- broadcast as a set to the incremented value
+                         (pPacket { pAction = "set"
+                                  , pPayload = Just v''
+                                  }))
 incObjectProp _ _ _ _ env = return $ errorResult (pPacket env) "Nothing to inc"
 
 setObjectProp :: UId -> OId -> Text -> Maybe A.Value -> PacketEnv -> IO Result
@@ -242,7 +246,10 @@ incObject uid oid (Just (A.Object o)) env@PacketEnv{..} =
           Nothing  -> (m, errorResult pPacket "Invalid increment")
           Just kvs -> let new = foldl' insert o' kvs in
               (M.insert oid new m, OK (ObjectUpdated oid) 
-                  (addP pPacket (M.fromList kvs)))
+                  -- broadcast as a set to the incremented value
+                  (pPacket { pAction = "set"
+                           , pPayload = Just (A.toJSON $ M.fromList kvs)
+                           }))
   where
     updates m = mapM (inc m) $ M.toList o
     inc m (k,v) = (,) k <$> join (flip incValue v <$> M.lookup k m)
