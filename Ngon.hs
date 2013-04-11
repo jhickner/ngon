@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings, RecordWildCards #-}
 
 -- should inc send sets to other clients?
+-- makes all functions need access to the packet, longer fn sigs
 
 -- check out bacon.js
 -- https://github.com/raimohanska/bacon.js/wiki/Documentation
