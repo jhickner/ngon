@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings, RecordWildCards #-}
 
--- fix discarded extra bytes after connect
+-- should inc send sets to other clients?
 
 -- check out bacon.js
 -- https://github.com/raimohanska/bacon.js/wiki/Documentation

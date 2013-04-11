@@ -55,6 +55,13 @@ type WS = WebSockets Hybi00
 instance TextProtocol p => Show (Sink p) where
   show _ = "<Sink>"
 
+data Lock = Lock UId OId deriving (Show, Eq, Ord, Data, Typeable)
+
+instance Indexable Lock where
+    empty = ixSet [ ixFun $ \(Lock uid _) -> [uid]
+                  , ixFun $ \(Lock _ oid) -> [oid]
+                  ]
+
 data Client = Client
   { cUId :: UId
   , cHandle :: ClientHandle
@@ -124,7 +131,6 @@ data Notifications
   | FileDeleted FilePath
     deriving (Show, Eq)
 
-
 data SubType
   = FileSub FilePath
   | ObjectSub OId
@@ -141,11 +147,4 @@ data SubEntry = SubEntry
 instance Indexable SubEntry where
     empty = ixSet [ ixFun $ \(SubEntry uid _) -> [uid]
                   , ixFun $ \(SubEntry _ st)  -> [st] 
-                  ]
-
-data Lock = Lock UId OId deriving (Show, Eq, Ord, Data, Typeable)
-
-instance Indexable Lock where
-    empty = ixSet [ ixFun $ \(Lock uid _) -> [uid]
-                  , ixFun $ \(Lock _ oid) -> [oid]
                   ]
