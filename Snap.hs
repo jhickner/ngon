@@ -1,8 +1,7 @@
 {-# LANGUAGE OverloadedStrings, RecordWildCards #-}
 
--- locking
+-- fix discarded extra bytes after connect
 
--- can't do uploads and stuff from elm (fay?)
 -- check out bacon.js
 -- https://github.com/raimohanska/bacon.js/wiki/Documentation
 -- use elm example to make a bacon websocket
@@ -63,7 +62,7 @@ runConnectPacket :: ServerEnv -> ClientHandle -> Packet -> IO (Maybe Client)
 runConnectPacket env chandle p@Packet{..} =
     case pEndpoint of
         ["u", uid] -> do
-            let client = Client uid chandle
+            let client = Client (UId uid) chandle
             ok <- connectUser client (sUsers env)
             if ok
               then do
@@ -76,7 +75,7 @@ runConnectPacket env chandle p@Packet{..} =
                       sendPacket client $ addError "User id already in use" p
                   return Nothing
         _ -> do
-            let client = Client "unknown" chandle
+            let client = Client (UId "unknown") chandle
             sendPacket client $ addError "Connect first" p
             return Nothing
   where
@@ -101,22 +100,26 @@ dispatch :: PacketEnv -> IO Result
 dispatch env@PacketEnv{..} = d pEndpoint pAction
   where
     Packet{..}    = pPacket
+    Client{..}    = pClient
     ServerEnv{..} = pServerEnv
 
     -- Object commands
     d ["o"] "get"             = okResult <$> getObjects sObjects
-    d ["o", oid] "create"     = createObject oid pPayload sObjects
-    d ["o", oid] "get"        = maybeResult "No such object id" $ getObject oid sObjects
-    d ["o", oid] "set"        = mergeObject oid pPayload sObjects
-    d ["o", oid] "inc"        = incObject oid pPayload sObjects
+    d ["o", oid] "create"     = createObject (OId oid) pPayload sObjects
+    d ["o", oid] "get"        = maybeResult "No such object id" $ getObject (OId oid) sObjects
+    d ["o", oid] "set"        = mergeObject cUId (OId oid) pPayload sObjects sLocks
+    d ["o", oid] "inc"        = incObject cUId (OId oid) pPayload sObjects sLocks
 
-    d ["o", oid, prop] "get"  = getObjectProp oid prop sObjects
-    d ["o", oid, prop] "set"  = setObjectProp oid prop pPayload sObjects
-    d ["o", oid, prop] "inc"  = incObjectProp oid prop pPayload sObjects
+    d ["o", oid, prop] "get"  = getObjectProp (OId oid) prop sObjects 
+    d ["o", oid, prop] "set"  = setObjectProp cUId (OId oid) prop pPayload sObjects sLocks
+    d ["o", oid, prop] "inc"  = incObjectProp cUId (OId oid) prop pPayload sObjects sLocks
+
+    d ["o", oid] "lock"       = lockObject cUId (OId oid) sObjects sLocks
+    d ["o", oid] "unlock"     = unlockObject cUId (OId oid) sObjects sLocks
 
     -- User commands
     d ["u"]      "get"        = okResult <$> getUsers sUsers
-    d ["u", uid] "set"        = msgUser pPacket uid pClient sUsers
+    d ["u", uid] "set"        = msgUser pPacket (UId uid) pClient sUsers
 
     -- File commands
     d ("f":p)    "get"        = okResult <$> listFiles (mkPath p)
@@ -124,12 +127,12 @@ dispatch env@PacketEnv{..} = d pEndpoint pAction
 
     -- Subscription commands
     d ["o"]      "sub"        = addSub env AllObjectsSub
-    d ["o", oid] "sub"        = addSub env (ObjectSub oid)
+    d ["o", oid] "sub"        = addSub env (ObjectSub (OId oid))
     d ["u"]      "sub"        = addSub env AllUsersSub
     d ("f":p)    "sub"        = addSub env (FileSub $ mkPath p)
 
     d ["o"]      "unsub"      = unSub env AllObjectsSub
-    d ["o", oid] "unsub"      = unSub env (ObjectSub oid)
+    d ["o", oid] "unsub"      = unSub env (ObjectSub (OId oid))
     d ["u"]      "unsub"      = unSub env AllUsersSub
     d ("f":p)    "unsub"      = unSub env (FileSub $ mkPath p)
 
@@ -220,7 +223,7 @@ wsAPI env rq = do
   where
     handler client e = liftIO $ do
         print e 
-        disconnectUser (cUserId client) env
+        disconnectUser (cUId client) env
 
 -- | loop parsing JSON as long as action returns Nothing
 webSocketDecoder :: A.FromJSON a => (a -> IO (Maybe b)) -> WS b
@@ -241,25 +244,28 @@ webSocketDecoder action = loop
 
 runSocketServer env@ServerEnv{..} =
     serveFork (Host "127.0.0.1") "8001" $ \(sock, _remoteAddr) -> do
-        mclient <- socketDecoder sock $ runConnectPacket env (SocketClient sock)
+        (bs, mclient) <- socketDecoder sock Nothing $ 
+            runConnectPacket env (SocketClient sock)
         case mclient of
           Nothing     -> return () -- disconnected
           Just client -> flip finally (cleanup client) $ 
-              void $ socketDecoder sock $ \p -> do
+              void $ socketDecoder sock (Just bs) $ \p -> do
                   mrpacket <- runPacket $ PacketEnv env client p
                   maybe (return ()) (sendAll sock . toStrict . encode) mrpacket
                   return Nothing
   where
-    cleanup client = disconnectUser (cUserId client) env
+    cleanup client = disconnectUser (cUId client) env
         
 -- | loop parsing JSON as long as action returns Nothing
-socketDecoder :: A.FromJSON a => Socket-> (a -> IO (Maybe b)) -> IO (Maybe b)
-socketDecoder sock action = loop Nothing Nothing
+socketDecoder :: A.FromJSON a => Socket 
+              -> Maybe B.ByteString
+              -> (a -> IO (Maybe b)) -> IO (B.ByteString, Maybe b)
+socketDecoder sock bs action = loop Nothing bs
   where 
     loop mpartial mbytes = do
         bytes <- maybe (recv sock 4096) return mbytes
         if B.null bytes
-          then return Nothing
+          then return (B.empty, Nothing)
           else case maybe (PB.parse A.json') PB.feed mpartial bytes of
             PB.Fail _ _ _reason -> loop Nothing Nothing
             k@PB.Partial{}      -> loop (Just k) Nothing
@@ -268,7 +274,9 @@ socketDecoder sock action = loop Nothing Nothing
                              A.Success a -> action a
                              _           -> return Nothing
                 case mb of
-                  Just b  -> return $ Just b
+                  Just b  -> 
+                      -- return any extra bytes along with the result
+                      return (bytes', Just b)
                   Nothing -> loop Nothing $ if B.null bytes' 
                                               then Nothing 
                                               else Just bytes'
@@ -296,6 +304,7 @@ main :: IO ()
 main = do
     env <- ServerEnv <$> newMVar M.empty
                      <*> newMVar M.empty 
+                     <*> newMVar Ix.empty
                      <*> newMVar Ix.empty
     t1 <- myThreadId
     t2 <- forkIO $ runWebServer env

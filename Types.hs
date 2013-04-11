@@ -10,6 +10,7 @@ import Control.Concurrent.MVar
 import Network.Socket (Socket)
 import Network.WebSockets (WebSockets, Sink, TextProtocol, Hybi00)
 
+import Data.Hashable (Hashable, hashWithSalt, hashUsing)
 import Data.Data
 import Data.IxSet
 import Data.HashMap.Strict (HashMap)
@@ -20,12 +21,20 @@ import Data.Aeson (Object, Value(..), object, ToJSON(..), FromJSON(..), (.=), (.
 import Data.Monoid
 import Data.Maybe (isJust, fromMaybe)
 
-type ObjectId = Text
-type UserId   = Text
+data OId = OId { getOId :: Text} deriving (Show, Eq, Ord, Data, Typeable)
+data UId = UId { getUId :: Text} deriving (Show, Eq, Ord, Data, Typeable)
 
-type UserMap = HashMap UserId Client
-type ObjectMap = HashMap ObjectId Object
-type SubSet = IxSet SubEntry
+instance Hashable OId where hashWithSalt = hashUsing getOId
+instance Hashable UId where hashWithSalt = hashUsing getUId
+
+instance ToJSON OId where toJSON (OId oid) = String oid
+instance ToJSON UId where toJSON (UId uid) = String uid
+
+
+type UserMap   = HashMap UId Client
+type ObjectMap = HashMap OId Object
+type SubSet    = IxSet SubEntry
+type LockSet   = IxSet Lock
 
 data ServerEnv = ServerEnv
   { sUsers   :: MVar UserMap
@@ -47,7 +56,7 @@ instance TextProtocol p => Show (Sink p) where
   show _ = "<Sink>"
 
 data Client = Client
-  { cUserId :: UserId
+  { cUId :: UId
   , cHandle :: ClientHandle
   } deriving (Show, Eq)
 
@@ -58,9 +67,9 @@ data ClientHandle
     deriving (Show, Eq)
 
 instance ToJSON Client where
-  toJSON (Client uid _) = String uid
+  toJSON (Client (UId uid) _) = String uid
   
-httpClient = Client "http" HTTPClient
+httpClient = Client (UId "http") HTTPClient
 
 data Packet = Packet
     { pId       :: Maybe Integer
@@ -107,24 +116,24 @@ data Result
 
 data Notifications 
   = NoNotifications
-  | ObjectUpdated ObjectId
-  | ObjectCreated ObjectId
-  | ObjectDeleted ObjectId
-  | UserDisconnected UserId
-  | UserConnected UserId
+  | ObjectUpdated OId
+  | ObjectCreated OId
+  | ObjectDeleted OId
+  | UserDisconnected UId
+  | UserConnected UId
   | FileDeleted FilePath
     deriving (Show, Eq)
 
 
 data SubType
   = FileSub FilePath
-  | ObjectSub ObjectId
+  | ObjectSub OId
   | AllObjectsSub
   | AllUsersSub
     deriving (Show, Eq, Ord, Data, Typeable)
 
 data SubEntry = SubEntry 
-    { sUserId  :: UserId
+    { sUId  :: UId
     , sSubType :: SubType 
     }
     deriving (Show, Eq, Ord, Data, Typeable)
@@ -134,9 +143,7 @@ instance Indexable SubEntry where
                   , ixFun $ \(SubEntry _ st)  -> [st] 
                   ]
 
-type LockSet = IxSet Lock
-
-data Lock = Lock UserId ObjectId deriving (Show, Eq, Data, Typeable)
+data Lock = Lock UId OId deriving (Show, Eq, Ord, Data, Typeable)
 
 instance Indexable Lock where
     empty = ixSet [ ixFun $ \(Lock uid _) -> [uid]

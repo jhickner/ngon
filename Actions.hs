@@ -20,7 +20,7 @@ import qualified Data.HashMap.Strict as M
 import qualified Data.Vector as V
 
 import qualified Data.IxSet as Ix
-import Data.IxSet ((@+))
+import Data.IxSet ((@+), (@=))
 
 import Data.List (foldl')
 import Data.Monoid ((<>))
@@ -73,12 +73,13 @@ sendNotifications env p sts = do
     clients <- getSubs env sts
     mapM_ (`sendPacket` p) clients
 
--- potential STM use here between subs and user map
 getSubs :: ServerEnv -> [SubType] -> IO [Client]
 getSubs ServerEnv{..} sts = do
-    subs' <- readMVar sSubs
-    umap' <- readMVar sUsers
-    return $ mapMaybe ((`M.lookup` umap') . sUserId) . Ix.toList $ subs' @+ sts
+    subs' <- takeMVar sSubs
+    umap' <- takeMVar sUsers
+    putMVar sSubs subs'
+    putMVar sUsers umap'
+    return $ mapMaybe ((`M.lookup` umap') . sUId) . Ix.toList $ subs' @+ sts
 
 sendPacket :: Client -> Packet -> IO ()
 sendPacket (Client _ (SocketClient s)) p = sendAll s . A.encode $ p
@@ -102,12 +103,12 @@ addSub env@PacketEnv{..} st =
                 Ix.insert entry (Ix.delete entry s) -- prevent dups
             return $ OK NoNotifications true
   where
-    entry = SubEntry (cUserId pClient) st
+    entry = SubEntry (cUId pClient) st
 
 unSub :: PacketEnv -> SubType -> IO Result
 unSub PacketEnv{..} st = do
     modifyMVar_ (sSubs pServerEnv) $ \s -> return $
-        Ix.delete (SubEntry (cUserId pClient) st) s
+        Ix.delete (SubEntry (cUId pClient) st) s
     return $ OK NoNotifications true
 
 sendInitialUpdate :: PacketEnv -> SubType -> IO ()
@@ -116,7 +117,7 @@ sendInitialUpdate PacketEnv{..} st =
       AllUsersSub -> do
         uids <- getUsers sUsers
         forM_ uids $ \u -> sendPacket pClient $ 
-            Packet Nothing ["u",u] "connect" Nothing Nothing
+            Packet Nothing ["u", getUId u] "connect" Nothing Nothing
       AllObjectsSub -> do
         objs <- getObjects sObjects
         mapM_ sendObj objs
@@ -137,11 +138,52 @@ sendInitialUpdate PacketEnv{..} st =
 -------------------------------------------------------------------------------
 -- Object Locks
 
+withLockedObject :: UId -> OId
+                 -> MVar ObjectMap
+                 -> MVar LockSet
+                 -> (A.Object -> ObjectMap -> IO (ObjectMap, Result))
+                 -> IO Result
+withLockedObject uid oid omap locks f = 
+    withObject oid omap $ \o m -> do
+        l <- takeMVar locks
+        res <- case Ix.getOne (l @= oid) of
+            Just (Lock uid' _) | uid' == uid -> f o m
+            Nothing -> f o m
+            Just _  -> return (m, errorResult "Object is locked")
+        void $ putMVar locks l
+        return res
+
+lockObject :: UId -> OId -> MVar ObjectMap -> MVar LockSet -> IO Result
+lockObject uid oid omap locks = 
+    withObject oid omap $ \_ m ->
+        modifyMVar locks $ \l ->
+          return $ case Ix.getOne (l @= oid) of
+            Just (Lock uid' _) | uid' == uid -> (l, (m, ok))
+            Nothing -> (Ix.insert (Lock uid oid) l, (m, ok))
+            Just _  -> (l, (m, errorResult "Object is already locked"))
+  where
+    ok = OK NoNotifications true
+
+unlockObject :: UId -> OId -> MVar ObjectMap -> MVar LockSet -> IO Result
+unlockObject uid oid omap locks = 
+    withObject oid omap $ \_ m -> do
+        modifyMVar_ locks $ \l -> return $ Ix.delete (Lock uid oid) l
+        return (m, OK NoNotifications true)
 
 -------------------------------------------------------------------------------
 -- Objects
 
-createObject :: ObjectId -> Maybe A.Value -> MVar ObjectMap -> IO Result
+withObject :: OId 
+           -> MVar ObjectMap 
+           -> (A.Object -> ObjectMap -> IO (ObjectMap, Result))
+           -> IO Result
+withObject oid omap f =
+    modifyMVar omap $ \m -> 
+      case M.lookup oid m of
+        Nothing -> return (m, errorResult "No such object id")
+        Just o  -> f o m
+
+createObject :: OId -> Maybe A.Value -> MVar ObjectMap -> IO Result
 createObject oid (Just (A.Object o)) omap =
     modifyMVar omap $ \m ->
         return $ case M.lookup oid m of
@@ -150,73 +192,63 @@ createObject oid (Just (A.Object o)) omap =
   where o' = M.insert "id" (A.toJSON oid) o -- insert oid as "id" prop
 createObject _ _ _ = return $ errorResult "The initial value must be an object"
   
-getObject :: ObjectId -> MVar ObjectMap -> IO (Maybe A.Object)
+getObject :: OId -> MVar ObjectMap -> IO (Maybe A.Object)
 getObject oid omap = M.lookup oid <$> readMVar omap
 
 getObjects :: MVar ObjectMap -> IO [A.Object]
 getObjects omap = M.elems <$> readMVar omap
 
-getObjectProp :: ObjectId -> Text -> MVar ObjectMap -> IO Result
-getObjectProp oid prop omap = do
-    obj <- M.lookup oid <$> readMVar omap
-    return $ case obj of
-      Nothing -> errorResult "No such object id"
-      Just o  -> case M.lookup prop o of
-        Nothing -> errorResult "No such key in object"
-        Just v  -> OK NoNotifications (A.toJSON v) 
+getObjectProp :: OId -> Text -> MVar ObjectMap -> IO Result
+getObjectProp oid prop omap =
+    withObject oid omap $ \o m -> return $
+      case M.lookup prop o of
+        Nothing -> (m, errorResult "No such key in object")
+        Just v  -> (m, OK NoNotifications (A.toJSON v))
 
-incObjectProp :: ObjectId -> Text -> Maybe A.Value -> MVar ObjectMap -> IO Result
-incObjectProp oid prop (Just v) omap =
-    modifyMVar omap $ \m ->
-      return $ case M.lookup oid m of
-        Nothing -> (m, errorResult "No such object id")
-        Just o' -> case M.lookup prop o' of
+incObjectProp :: UId -> OId -> Text -> Maybe A.Value 
+              -> MVar ObjectMap -> MVar LockSet -> IO Result
+incObjectProp uid oid prop (Just v) omap locks =
+    withLockedObject uid oid omap locks $ \o m -> return $
+      case M.lookup prop o of
           Nothing -> (m, errorResult "No such key in object")
           Just v' -> case incValue v' v of
             Nothing  -> (m, errorResult "Invalid increment")
-            Just v'' -> (M.insert oid (M.insert prop v'' o') m, 
+            Just v'' -> (M.insert oid (M.insert prop v'' o) m, 
                          OK (ObjectUpdated oid) v'')
-incObjectProp _ _ _ _ = return $ errorResult "Nothing to inc"
+incObjectProp _ _ _ _ _ _ = return $ errorResult "Nothing to inc"
 
-setObjectProp :: ObjectId -> Text -> Maybe A.Value -> MVar ObjectMap -> IO Result
-setObjectProp oid prop (Just v) omap =
-    modifyMVar omap $ \m ->
-      return $ case M.lookup oid m of
-        Nothing -> (m, errorResult "No such object id")
-        Just o' -> (M.insert oid (M.insert prop v o') m, OK (ObjectUpdated oid) v)
-setObjectProp _ _ _ _ = return $ errorResult "Nothing to set"
+setObjectProp :: UId -> OId -> Text -> Maybe A.Value 
+              -> MVar ObjectMap -> MVar LockSet -> IO Result
+setObjectProp uid oid prop (Just v) omap locks =
+    withLockedObject uid oid omap locks $ \o m -> return
+        (M.insert oid (M.insert prop v o) m, OK (ObjectUpdated oid) v)
+setObjectProp _ _ _ _ _ _ = return $ errorResult "Nothing to set"
 
-deleteObject :: ObjectId -> MVar ObjectMap -> IO Result
-deleteObject oid omap =
-    modifyMVar omap $ \m ->
-      return $ case M.lookup oid m of
-        Nothing -> (m, errorResult "No such object id") 
-        Just _  -> (M.delete oid m, OK (ObjectDeleted oid) true)
+deleteObject :: UId -> OId -> MVar ObjectMap -> MVar LockSet -> IO Result
+deleteObject uid oid omap locks =
+    withLockedObject uid oid omap locks $ \_ m -> return
+        (M.delete oid m, OK (ObjectDeleted oid) true)
 
-mergeObject :: ObjectId -> Maybe A.Value -> MVar ObjectMap -> IO Result
-mergeObject oid (Just (A.Object o)) omap =
-    modifyMVar omap $ \m ->
-      return $ case M.lookup oid m of
-        Nothing -> (m, errorResult "No such object id")
-        Just o' -> let new = o <> o' in
-          (M.insert oid new m, OK (ObjectUpdated oid) (A.toJSON new))
-mergeObject _ _ _ = return $ errorResult "The value must be an object"
+mergeObject :: UId -> OId -> Maybe A.Value 
+            -> MVar ObjectMap -> MVar LockSet -> IO Result
+mergeObject uid oid (Just (A.Object o)) omap locks =
+    withLockedObject uid oid omap locks $ \o' m -> let new = o <> o' in
+      return (M.insert oid new m, OK (ObjectUpdated oid) (A.toJSON new))
+mergeObject _ _ _ _ _ = return $ errorResult "The value must be an object"
 
-incObject :: ObjectId -> Maybe A.Value -> MVar ObjectMap -> IO Result
-incObject oid (Just (A.Object o)) omap =
-    modifyMVar omap $ \m ->
-      return $ case M.lookup oid m of
-        Nothing -> (m, errorResult "No such object id")
-        Just o' -> 
-          case updates o' of
-            Nothing  -> (m, errorResult "Invalid increment")
-            Just kvs -> let new = foldl' insert o' kvs in
-                (M.insert oid new m, OK (ObjectUpdated oid) (A.toJSON new))
+incObject :: UId -> OId -> Maybe A.Value 
+          -> MVar ObjectMap -> MVar LockSet -> IO Result
+incObject uid oid (Just (A.Object o)) omap locks =
+    withLockedObject uid oid omap locks $ \o' m -> return $
+        case updates o' of
+          Nothing  -> (m, errorResult "Invalid increment")
+          Just kvs -> let new = foldl' insert o' kvs in
+              (M.insert oid new m, OK (ObjectUpdated oid) (A.toJSON new))
   where
     updates m = mapM (inc m) $ M.toList o
     inc m (k,v) = (,) k <$> join (flip incValue v <$> M.lookup k m)
     insert m (k,v) = M.insert k v m
-incObject _ _ _ = return $ errorResult "The value must be an object"
+incObject _ _ _ _ _ = return $ errorResult "The value must be an object"
 
 -- | attempt to combine two A.Values
 incValue :: A.Value -> A.Value -> Maybe A.Value
@@ -255,23 +287,25 @@ deleteFile fp = handle ioErrorResult $ do
 connectUser :: Client -> MVar UserMap -> IO Bool
 connectUser client@Client{..} umap =
     modifyMVar umap $ \m ->
-      return $ case M.lookup cUserId m of
-        Nothing -> (M.insert cUserId client m, True)
+      return $ case M.lookup cUId m of
+        Nothing -> (M.insert cUId client m, True)
         Just _  -> (m, False) 
 
-disconnectUser :: UserId -> ServerEnv -> IO ()
+disconnectUser :: UId -> ServerEnv -> IO ()
 disconnectUser uid env@ServerEnv{..} = do
     sendNotifications env 
-        (Packet Nothing ["u", uid] "disconnect" Nothing Nothing)
+        (Packet Nothing ["u", getUId uid] "disconnect" Nothing Nothing)
         [AllUsersSub]
     modifyMVar_ sUsers $ return . M.delete uid
     modifyMVar_ sSubs $ \s -> return $
       foldl' (flip Ix.delete) s (Ix.toList $ Ix.getEQ uid s)
+    modifyMVar_ sLocks $ \l -> return $
+      foldl' (flip Ix.delete) l (Ix.toList $ Ix.getEQ uid l)
 
-getUsers :: MVar UserMap -> IO [Text]
+getUsers :: MVar UserMap -> IO [UId]
 getUsers umap = M.keys <$> readMVar umap
 
-msgUser :: Packet -> UserId -> Client -> MVar UserMap -> IO Result
+msgUser :: Packet -> UId -> Client -> MVar UserMap -> IO Result
 msgUser p uid (Client fuid _) umap = do
     mclient <- M.lookup uid <$> readMVar umap
     case mclient of
@@ -279,7 +313,7 @@ msgUser p uid (Client fuid _) umap = do
       Just (Client _ HTTPClient) -> return $ errorResult "Can't message HTTP clients"
       Just client                -> do
           sendPacket client (p { pId = Nothing
-                               , pEndpoint = ["u", fuid]
+                               , pEndpoint = ["u", getUId fuid]
                                })
           return $ OK NoNotifications true 
       
