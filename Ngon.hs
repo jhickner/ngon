@@ -14,7 +14,6 @@ import System.FilePath
 import System.Directory
 
 import System.Posix.Signals
-import System.Exit (ExitCode(..))
 
 import Network.Socket (Socket)
 import Network.Socket.ByteString (recv, sendAll)
@@ -36,110 +35,57 @@ import qualified Data.IxSet as Ix
 
 import qualified Data.HashMap.Strict as M
 import qualified Data.ByteString.Char8 as B
-import qualified Data.ByteString.Lazy as BL
 
 import qualified Data.Attoparsec as PB
-import qualified Data.Aeson.Parser as P
 import qualified Data.Aeson as A
 import Data.Aeson (encode)
 
 import Data.Maybe (fromJust)
 
 import TCP
+import Utils
 import Types
 import Actions
 
 
 -------------------------------------------------------------------------------
--- Packet Processing
+-- Main / Server
 
--- | Initial packet handler for new clients. Only accepts packets with endpoint
--- "u/username" and attempts to connect them. Loops until a successful
--- connection and then returns a 'Client' object.
-runConnectPacket :: ServerEnv -> ClientHandle -> Packet -> IO (Maybe Client)
-runConnectPacket ServerEnv{..} chandle p@Packet{..} =
-    case pEndpoint of
-        ["u", uid] -> do
-            let client = Client (UId uid) chandle
-            ok <- connectUser client sUsers
-            if ok
-              then do
-                  sendConnect uid 
-                  when (hasId p) $ 
-                      sendPacket client $ p { pPayload = Just true }
-                  return $ Just client
-              else do
-                  when (hasId p) $ 
-                      sendPacket client $ addE p "User id already in use"
-                  return Nothing
-        _ -> do
-            let client = Client (UId "unknown") chandle
-            sendPacket client $ addE p "Connect first"
-            return Nothing
-  where
-    sendConnect uid = sendNotifications sSubs sUsers
-                        (Packet Nothing ["u", uid] "connect" Nothing Nothing)
-                        [AllUsersSub]
+main :: IO ()
+main = do
+    env <- ServerEnv <$> newMVar M.empty
+                     <*> newMVar M.empty 
+                     <*> newMVar Ix.empty
+                     <*> newMVar Ix.empty
+    t  <- myThreadId
+    t1 <- forkIO $ runWebServer env
+    t2 <- forkIO $ runSocketServer env
+    installHandler sigINT (Catch $ sigINThandler [t, t1, t2]) Nothing
+    forever $ threadDelay 1000000
+  where sigINThandler = mapM_ killThread
 
--- | Packet handler for connected clients.
-runPacket :: PacketEnv -> IO (Maybe Packet)
-runPacket env = do
-    res <- dispatch env
-    notify env res
-    return $ if hasId (pPacket env)
-               then Just $ getP res
-               else Nothing
-  where 
-    getP (Error p) = p
-    getP (OK _ p)  = p
+runWebServer :: ServerEnv -> IO ()
+runWebServer env = httpServe config (route routes) where
+    routes = [ ("/ws",    setTimeout 31536000 >> runWebSocketsSnap (wsAPI env))
+             , ("/api",   httpAPI env)
+             , ("/files", handleUploads env)
+             , ("/files", serveDirectory fileRoot)
+             , ("/",      serveDirectory "static")
+             ]
 
-dispatch :: PacketEnv -> IO Result
-dispatch env@PacketEnv{..} = d pEndpoint pAction
-  where
-    Packet{..} = pPacket
-    Client{..} = pClient
-
-    -- Object commands
-    d ["o"] "get"             = okResult pPacket <$> getObjects env
-    d ["o", oid] "create"     = createObject (OId oid) pPayload env
-    d ["o", oid] "get"        = maybeResult pPacket "No such object id" $ 
-                                  getObject (OId oid) env
-    d ["o", oid] "set"        = mergeObject cUId (OId oid) pPayload env
-    d ["o", oid] "inc"        = incObject cUId (OId oid) pPayload env
-
-    d ["o", oid, prop] "get"  = getObjectProp (OId oid) prop env
-    d ["o", oid, prop] "set"  = setObjectProp cUId (OId oid) prop pPayload env
-    d ["o", oid, prop] "inc"  = incObjectProp cUId (OId oid) prop pPayload env
-
-    d ["o", oid] "lock"       = lockObject cUId (OId oid) env
-    d ["o", oid] "unlock"     = unlockObject cUId (OId oid) env
-
-    -- User commands
-    d ["u"]      "get"        = okResult pPacket <$> getUsers env
-    d ["u", uid] "set"        = msgUser (UId uid) env
-
-    -- File commands
-    d ("f":p)    "get"        = okResult pPacket <$> listFiles (mkPath p)
-    d ("f":p)    "delete"     = deleteFile pPacket (mkPath p)
-
-    -- Subscription commands
-    d ["o"]      "sub"        = addSub env AllObjectsSub
-    d ["o", oid] "sub"        = addSub env (ObjectSub (OId oid))
-    d ["u"]      "sub"        = addSub env AllUsersSub
-    d ("f":p)    "sub"        = addSub env (FileSub $ mkPath p)
-
-    d ["o"]      "unsub"      = unSub env AllObjectsSub
-    d ["o", oid] "unsub"      = unSub env (ObjectSub (OId oid))
-    d ["u"]      "unsub"      = unSub env AllUsersSub
-    d ("f":p)    "unsub"      = unSub env (FileSub $ mkPath p)
-
-    d _ _                     = return $ errorResult pPacket "No such endpoint"
-    
+config :: Config Snap a
+config = 
+    setPort 8000 .
+    setVerbose False .
+    setErrorLog  (ConfigIoLog B.putStrLn) .
+    setAccessLog ConfigNoLog $
+    defaultConfig 
 
 -------------------------------------------------------------------------------
--- Web API
+-- HTTP API
 
-webAPI env = do
+httpAPI :: ServerEnv -> Snap ()
+httpAPI env = do
     packet <- Packet (Just 1) <$> (parseEndpoint <$> getSafePath) 
                               <*> parseAction
                               <*> parsePayload
@@ -176,6 +122,9 @@ parseAction = do
            POST   -> return "set"
            DELETE -> return "delete"
            _      -> pass   
+
+-------------------------------------------------------------------------------
+-- Upload handler
 
 handleUploads :: ServerEnv -> Snap ()
 handleUploads ServerEnv{..} = method POST $ do
@@ -278,57 +227,89 @@ socketDecoder sock bs action = loop Nothing bs
                                               then Nothing 
                                               else Just bytes'
                   
--------------------------------------------------------------------------------
--- Main
-
-config = 
-    setPort 8000 .
-    setVerbose False .
-    setErrorLog  (ConfigIoLog B.putStrLn) .
-    setAccessLog ConfigNoLog $
-    defaultConfig 
-
-runWebServer :: ServerEnv -> IO ()
-runWebServer env = httpServe config (route routes) where
-    routes = [ ("/ws", setTimeout 31536000 >> runWebSocketsSnap (wsAPI env))
-             , ("/api", webAPI env)
-             , ("/files", handleUploads env)
-             , ("/files", serveDirectory fileRoot)
-             , ("/", serveDirectory "static")
-             ]
-
-main :: IO ()
-main = do
-    env <- ServerEnv <$> newMVar M.empty
-                     <*> newMVar M.empty 
-                     <*> newMVar Ix.empty
-                     <*> newMVar Ix.empty
-    t1 <- myThreadId
-    t2 <- forkIO $ runWebServer env
-    t3 <- forkIO $ runSocketServer env
-    installHandler sigINT (Catch $ sigINThandler [t3,t2,t1]) Nothing
-    forever $ threadDelay 1000000
-
-sigINThandler :: [ThreadId] -> IO ()
-sigINThandler = mapM_ (`throwTo` ExitSuccess)
 
 -------------------------------------------------------------------------------
--- Parsing Utils
+-- Packet Processing
 
-toStrict :: BL.ByteString -> B.ByteString
-toStrict = B.concat . BL.toChunks
+-- | Initial packet handler for new clients. Only accepts packets with endpoint
+-- "u/username" and attempts to connect them. Loops until a successful
+-- connection and then returns a 'Client' object.
+runConnectPacket :: ServerEnv -> ClientHandle -> Packet -> IO (Maybe Client)
+runConnectPacket ServerEnv{..} chandle p@Packet{..} =
+    case pEndpoint of
+        ["u", uid] -> do
+            let client = Client (UId uid) chandle
+            ok <- connectUser client sUsers
+            if ok
+              then do
+                  sendConnect uid 
+                  when (hasId p) $ 
+                      sendPacket client $ p { pPayload = Just true }
+                  return $ Just client
+              else do
+                  when (hasId p) $ 
+                      sendPacket client $ addE p "User id already in use"
+                  return Nothing
+        _ -> do
+            let client = Client (UId "unknown") chandle
+            sendPacket client $ addE p "Connect first"
+            return Nothing
+  where
+    sendConnect uid = sendNotifications sSubs sUsers
+                        (Packet Nothing ["u", uid] "connect" Nothing Nothing)
+                        [AllUsersSub]
 
-decodeStrictValue :: B.ByteString -> Maybe A.Value
-decodeStrictValue bs = 
-    case PB.parseOnly P.value bs of
-      Left _  -> Nothing
-      Right v -> Just v
+-- | Packet handler for connected clients.
+runPacket :: PacketEnv -> IO (Maybe Packet)
+runPacket env = do
+    res <- dispatch env
+    notify env res
+    return $ if hasId (pPacket env)
+               then Just $ getP res
+               else Nothing
+  where 
+    getP (Error p) = p
+    getP (OK _ p)  = p
 
--- | strict Aeson decoding
-decodeStrict :: A.FromJSON a => B.ByteString -> Maybe a
-decodeStrict bs = 
-    case PB.parseOnly P.json' bs of
-      Left _  -> Nothing
-      Right v -> case A.fromJSON v of
-                   A.Success a -> Just a
-                   _           -> Nothing
+dispatch :: PacketEnv -> IO Result
+dispatch env@PacketEnv{..} = d pEndpoint pAction
+  where
+    Packet{..} = pPacket
+    Client{..} = pClient
+
+    -- Object commands
+    d ["o"] "get"             = okResult pPacket <$> getObjects env
+    d ["o", oid] "create"     = createObject (OId oid) pPayload env
+    d ["o", oid] "get"        = maybeResult pPacket "No such object id" $ 
+                                  getObject (OId oid) env
+    d ["o", oid] "set"        = mergeObject cUId (OId oid) pPayload env
+    d ["o", oid] "inc"        = incObject cUId (OId oid) pPayload env
+
+    d ["o", oid, prop] "get"  = getObjectProp (OId oid) prop env
+    d ["o", oid, prop] "set"  = setObjectProp cUId (OId oid) prop pPayload env
+    d ["o", oid, prop] "inc"  = incObjectProp cUId (OId oid) prop pPayload env
+
+    d ["o", oid] "lock"       = lockObject cUId (OId oid) env
+    d ["o", oid] "unlock"     = unlockObject cUId (OId oid) env
+
+    -- User commands
+    d ["u"]      "get"        = okResult pPacket <$> getUsers env
+    d ["u", uid] "set"        = msgUser (UId uid) env
+
+    -- File commands
+    d ("f":p)    "get"        = okResult pPacket <$> listFiles (mkPath p)
+    d ("f":p)    "delete"     = deleteFile pPacket (mkPath p)
+
+    -- Subscription commands
+    d ["o"]      "sub"        = addSub env AllObjectsSub
+    d ["o", oid] "sub"        = addSub env (ObjectSub (OId oid))
+    d ["u"]      "sub"        = addSub env AllUsersSub
+    d ("f":p)    "sub"        = addSub env (FileSub $ mkPath p)
+
+    d ["o"]      "unsub"      = unSub env AllObjectsSub
+    d ["o", oid] "unsub"      = unSub env (ObjectSub (OId oid))
+    d ["u"]      "unsub"      = unSub env AllUsersSub
+    d ("f":p)    "unsub"      = unSub env (FileSub $ mkPath p)
+
+    d _ _                     = return $ errorResult pPacket "No such endpoint"
+
