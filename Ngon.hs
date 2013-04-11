@@ -60,11 +60,11 @@ import Actions
 -- "u/username" and attempts to connect them. Loops until a successful
 -- connection and then returns a 'Client' object.
 runConnectPacket :: ServerEnv -> ClientHandle -> Packet -> IO (Maybe Client)
-runConnectPacket env chandle p@Packet{..} =
+runConnectPacket ServerEnv{..} chandle p@Packet{..} =
     case pEndpoint of
         ["u", uid] -> do
             let client = Client (UId uid) chandle
-            ok <- connectUser client (sUsers env)
+            ok <- connectUser client sUsers
             if ok
               then do
                   sendConnect uid 
@@ -80,7 +80,7 @@ runConnectPacket env chandle p@Packet{..} =
             sendPacket client $ addError "Connect first" p
             return Nothing
   where
-    sendConnect uid = sendNotifications env 
+    sendConnect uid = sendNotifications sSubs sUsers
                         (Packet Nothing ["u", uid] "connect" Nothing Nothing)
                         [AllUsersSub]
 
@@ -100,27 +100,26 @@ runPacket env = do
 dispatch :: PacketEnv -> IO Result
 dispatch env@PacketEnv{..} = d pEndpoint pAction
   where
-    Packet{..}    = pPacket
-    Client{..}    = pClient
-    ServerEnv{..} = pServerEnv
+    Packet{..} = pPacket
+    Client{..} = pClient
 
     -- Object commands
-    d ["o"] "get"             = okResult <$> getObjects sObjects
-    d ["o", oid] "create"     = createObject (OId oid) pPayload sObjects
-    d ["o", oid] "get"        = maybeResult "No such object id" $ getObject (OId oid) sObjects
-    d ["o", oid] "set"        = mergeObject cUId (OId oid) pPayload sObjects sLocks
-    d ["o", oid] "inc"        = incObject cUId (OId oid) pPayload sObjects sLocks
+    d ["o"] "get"             = okResult <$> getObjects env
+    d ["o", oid] "create"     = createObject (OId oid) pPayload env
+    d ["o", oid] "get"        = maybeResult "No such object id" $ getObject (OId oid) env
+    d ["o", oid] "set"        = mergeObject cUId (OId oid) pPayload env
+    d ["o", oid] "inc"        = incObject cUId (OId oid) pPayload env
 
-    d ["o", oid, prop] "get"  = getObjectProp (OId oid) prop sObjects 
-    d ["o", oid, prop] "set"  = setObjectProp cUId (OId oid) prop pPayload sObjects sLocks
-    d ["o", oid, prop] "inc"  = incObjectProp cUId (OId oid) prop pPayload sObjects sLocks
+    d ["o", oid, prop] "get"  = getObjectProp (OId oid) prop env
+    d ["o", oid, prop] "set"  = setObjectProp cUId (OId oid) prop pPayload env
+    d ["o", oid, prop] "inc"  = incObjectProp cUId (OId oid) prop pPayload env
 
-    d ["o", oid] "lock"       = lockObject cUId (OId oid) sObjects sLocks
-    d ["o", oid] "unlock"     = unlockObject cUId (OId oid) sObjects sLocks
+    d ["o", oid] "lock"       = lockObject cUId (OId oid) env
+    d ["o", oid] "unlock"     = unlockObject cUId (OId oid) env
 
     -- User commands
-    d ["u"]      "get"        = okResult <$> getUsers sUsers
-    d ["u", uid] "set"        = msgUser pPacket (UId uid) pClient sUsers
+    d ["u"]      "get"        = okResult <$> getUsers env
+    d ["u", uid] "set"        = msgUser (UId uid) env
 
     -- File commands
     d ("f":p)    "get"        = okResult <$> listFiles (mkPath p)
@@ -148,7 +147,7 @@ webAPI env = do
                               <*> parseAction
                               <*> parsePayload
                               <*> return Nothing
-    rpacket <- (fromJust <$>) . liftIO $ runPacket $ PacketEnv env httpClient packet
+    rpacket <- (fromJust <$>) . liftIO $ runPacket $ mkPacketEnv env httpClient packet
     writeJSON $ mplus (pError rpacket) (pPayload rpacket)
   where
     parseEndpoint = map T.pack . splitDirectories
@@ -182,7 +181,7 @@ parseAction = do
            _      -> pass   
 
 handleUploads :: ServerEnv -> Snap ()
-handleUploads env = method POST $ do
+handleUploads ServerEnv{..} = method POST $ do
       (tmp, rel, full) <- getPaths
       mkDirP full
       handleFileUploads tmp policy 
@@ -204,7 +203,7 @@ handleUploads env = method POST $ do
             Nothing -> return ()
             Just fn -> liftIO $ do
                 renameFile tfp (full </> fn')
-                sendNotifications env (packet $ rel </> fn') 
+                sendNotifications sSubs sUsers (packet $ rel </> fn') 
                   [FileSub rel]
               where fn' = B.unpack fn
 
@@ -218,7 +217,7 @@ wsAPI env rq = do
     client <- webSocketDecoder $ runConnectPacket env (WebSocketClient sink)
     flip WS.catchWsError (handler client) $
         webSocketDecoder $ \p -> do
-            mrpacket <- runPacket $ PacketEnv env client p
+            mrpacket <- runPacket $ mkPacketEnv env client p
             maybe (return ()) (WS.sendSink sink . WS.textData . encode) mrpacket
             return Nothing
   where
@@ -251,7 +250,7 @@ runSocketServer env@ServerEnv{..} =
           Nothing     -> return () -- disconnected
           Just client -> flip finally (cleanup client) $ 
               void $ socketDecoder sock (Just bs) $ \p -> do
-                  mrpacket <- runPacket $ PacketEnv env client p
+                  mrpacket <- runPacket $ mkPacketEnv env client p
                   maybe (return ()) (sendAll sock . toStrict . encode) mrpacket
                   return Nothing
   where

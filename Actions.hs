@@ -66,20 +66,19 @@ notify PacketEnv{..} res =
         FileDeleted fp    -> send' [FileSub $ takeDirectory fp]
         _ -> return ()
   where
-    send' = sendNotifications pServerEnv (pPacket { pId = Nothing })
+    send' = sendNotifications pSubs pUsers (pPacket { pId = Nothing })
 
-sendNotifications :: ServerEnv -> Packet -> [SubType] -> IO ()
-sendNotifications env p sts = do
-    clients <- getSubs env sts
+sendNotifications :: MVar SubSet -> MVar UserMap -> Packet -> [SubType] -> IO ()
+sendNotifications subs umap p sts = do
+    clients <- getSubs
     mapM_ (`sendPacket` p) clients
-
-getSubs :: ServerEnv -> [SubType] -> IO [Client]
-getSubs ServerEnv{..} sts = do
-    subs' <- takeMVar sSubs
-    umap' <- takeMVar sUsers
-    putMVar sSubs subs'
-    putMVar sUsers umap'
-    return $ mapMaybe ((`M.lookup` umap') . sUId) . Ix.toList $ subs' @+ sts
+  where
+    getSubs = do
+        subs' <- takeMVar subs
+        umap' <- takeMVar umap
+        putMVar subs subs'
+        putMVar umap umap'
+        return $ mapMaybe ((`M.lookup` umap') . sUId) . Ix.toList $ subs' @+ sts
 
 sendPacket :: Client -> Packet -> IO ()
 sendPacket (Client _ (SocketClient s)) p = sendAll s . A.encode $ p
@@ -99,7 +98,7 @@ addSub env@PacketEnv{..} st =
         HTTPClient -> return $ errorResult "HTTP clients can't subscribe"
         _          -> do
             sendInitialUpdate env st
-            modifyMVar_ (sSubs pServerEnv) $ \s -> return $
+            modifyMVar_ pSubs $ \s -> return $
                 Ix.insert entry (Ix.delete entry s) -- prevent dups
             return $ OK NoNotifications true
   where
@@ -107,29 +106,28 @@ addSub env@PacketEnv{..} st =
 
 unSub :: PacketEnv -> SubType -> IO Result
 unSub PacketEnv{..} st = do
-    modifyMVar_ (sSubs pServerEnv) $ \s -> return $
+    modifyMVar_ pSubs $ \s -> return $
         Ix.delete (SubEntry (cUId pClient) st) s
     return $ OK NoNotifications true
 
 sendInitialUpdate :: PacketEnv -> SubType -> IO ()
-sendInitialUpdate PacketEnv{..} st =
+sendInitialUpdate env@PacketEnv{..} st =
     case st of
       AllUsersSub -> do
-        uids <- getUsers sUsers
+        uids <- getUsers env
         forM_ uids $ \u -> sendPacket pClient $ 
             Packet Nothing ["u", getUId u] "connect" Nothing Nothing
       AllObjectsSub -> do
-        objs <- getObjects sObjects
+        objs <- getObjects env
         mapM_ sendObj objs
       ObjectSub oid -> do
-        obj <- getObject oid sObjects
+        obj <- getObject oid env
         maybe (return ()) sendObj obj
       FileSub fp -> do
         files <- listFiles fp
         forM_ files $ \f -> sendPacket pClient $
             Packet Nothing (fpToEndpoint $ fp </> f) "create" Nothing Nothing
   where
-    ServerEnv{..} = pServerEnv
     sendObj o = case M.lookup "id" o of
         Just (A.String oid) -> sendPacket pClient $
             Packet Nothing ["o",oid] "create" (Just $ A.Object o) Nothing
@@ -153,10 +151,10 @@ withLockedObject uid oid omap locks f =
         void $ putMVar locks l
         return res
 
-lockObject :: UId -> OId -> MVar ObjectMap -> MVar LockSet -> IO Result
-lockObject uid oid omap locks = 
-    withObject oid omap $ \_ m ->
-        modifyMVar locks $ \l ->
+lockObject :: UId -> OId -> PacketEnv -> IO Result
+lockObject uid oid PacketEnv{..} = 
+    withObject oid pObjects $ \_ m ->
+        modifyMVar pLocks $ \l ->
           return $ case Ix.getOne (l @= oid) of
             Just (Lock uid' _) | uid' == uid -> (l, (m, ok))
             Nothing -> (Ix.insert (Lock uid oid) l, (m, ok))
@@ -164,10 +162,10 @@ lockObject uid oid omap locks =
   where
     ok = OK NoNotifications true
 
-unlockObject :: UId -> OId -> MVar ObjectMap -> MVar LockSet -> IO Result
-unlockObject uid oid omap locks = 
-    withObject oid omap $ \_ m -> do
-        modifyMVar_ locks $ \l -> return $ Ix.delete (Lock uid oid) l
+unlockObject :: UId -> OId -> PacketEnv -> IO Result
+unlockObject uid oid PacketEnv{..} = 
+    withObject oid pObjects $ \_ m -> do
+        modifyMVar_ pLocks $ \l -> return $ Ix.delete (Lock uid oid) l
         return (m, OK NoNotifications true)
 
 -------------------------------------------------------------------------------
@@ -183,63 +181,60 @@ withObject oid omap f =
         Nothing -> return (m, errorResult "No such object id")
         Just o  -> f o m
 
-createObject :: OId -> Maybe A.Value -> MVar ObjectMap -> IO Result
-createObject oid (Just (A.Object o)) omap =
-    modifyMVar omap $ \m ->
+createObject :: OId -> Maybe A.Value -> PacketEnv -> IO Result
+createObject oid (Just (A.Object o)) env =
+    modifyMVar (pObjects env) $ \m ->
         return $ case M.lookup oid m of
           Nothing -> (M.insert oid o' m, OK (ObjectCreated oid) (A.toJSON o'))
           Just _  -> (m, errorResult "That object id already exists")
   where o' = M.insert "id" (A.toJSON oid) o -- insert oid as "id" prop
 createObject _ _ _ = return $ errorResult "The initial value must be an object"
   
-getObject :: OId -> MVar ObjectMap -> IO (Maybe A.Object)
-getObject oid omap = M.lookup oid <$> readMVar omap
+getObject :: OId -> PacketEnv -> IO (Maybe A.Object)
+getObject oid env = M.lookup oid <$> readMVar (pObjects env)
 
-getObjects :: MVar ObjectMap -> IO [A.Object]
-getObjects omap = M.elems <$> readMVar omap
+getObjects :: PacketEnv -> IO [A.Object]
+getObjects env = M.elems <$> readMVar (pObjects env)
 
-getObjectProp :: OId -> Text -> MVar ObjectMap -> IO Result
-getObjectProp oid prop omap =
-    withObject oid omap $ \o m -> return $
+getObjectProp :: OId -> Text -> PacketEnv -> IO Result
+getObjectProp oid prop env =
+    withObject oid (pObjects env) $ \o m -> return $
       case M.lookup prop o of
         Nothing -> (m, errorResult "No such key in object")
         Just v  -> (m, OK NoNotifications (A.toJSON v))
 
 incObjectProp :: UId -> OId -> Text -> Maybe A.Value 
-              -> MVar ObjectMap -> MVar LockSet -> IO Result
-incObjectProp uid oid prop (Just v) omap locks =
-    withLockedObject uid oid omap locks $ \o m -> return $
+              -> PacketEnv -> IO Result
+incObjectProp uid oid prop (Just v) PacketEnv{..} =
+    withLockedObject uid oid pObjects pLocks $ \o m -> return $
       case M.lookup prop o of
           Nothing -> (m, errorResult "No such key in object")
           Just v' -> case incValue v' v of
             Nothing  -> (m, errorResult "Invalid increment")
             Just v'' -> (M.insert oid (M.insert prop v'' o) m, 
                          OK (ObjectUpdated oid) v'')
-incObjectProp _ _ _ _ _ _ = return $ errorResult "Nothing to inc"
+incObjectProp _ _ _ _ _ = return $ errorResult "Nothing to inc"
 
-setObjectProp :: UId -> OId -> Text -> Maybe A.Value 
-              -> MVar ObjectMap -> MVar LockSet -> IO Result
-setObjectProp uid oid prop (Just v) omap locks =
-    withLockedObject uid oid omap locks $ \o m -> return
+setObjectProp :: UId -> OId -> Text -> Maybe A.Value -> PacketEnv -> IO Result
+setObjectProp uid oid prop (Just v) PacketEnv{..} =
+    withLockedObject uid oid pObjects pLocks $ \o m -> return
         (M.insert oid (M.insert prop v o) m, OK (ObjectUpdated oid) v)
-setObjectProp _ _ _ _ _ _ = return $ errorResult "Nothing to set"
+setObjectProp _ _ _ _ _ = return $ errorResult "Nothing to set"
 
-deleteObject :: UId -> OId -> MVar ObjectMap -> MVar LockSet -> IO Result
-deleteObject uid oid omap locks =
-    withLockedObject uid oid omap locks $ \_ m -> return
+deleteObject :: UId -> OId -> PacketEnv -> IO Result
+deleteObject uid oid PacketEnv{..} =
+    withLockedObject uid oid pObjects pLocks $ \_ m -> return
         (M.delete oid m, OK (ObjectDeleted oid) true)
 
-mergeObject :: UId -> OId -> Maybe A.Value 
-            -> MVar ObjectMap -> MVar LockSet -> IO Result
-mergeObject uid oid (Just (A.Object o)) omap locks =
-    withLockedObject uid oid omap locks $ \o' m -> let new = o <> o' in
+mergeObject :: UId -> OId -> Maybe A.Value -> PacketEnv -> IO Result
+mergeObject uid oid (Just (A.Object o)) PacketEnv{..} =
+    withLockedObject uid oid pObjects pLocks $ \o' m -> let new = o <> o' in
       return (M.insert oid new m, OK (ObjectUpdated oid) (A.toJSON new))
-mergeObject _ _ _ _ _ = return $ errorResult "The value must be an object"
+mergeObject _ _ _ _ = return $ errorResult "The value must be an object"
 
-incObject :: UId -> OId -> Maybe A.Value 
-          -> MVar ObjectMap -> MVar LockSet -> IO Result
-incObject uid oid (Just (A.Object o)) omap locks =
-    withLockedObject uid oid omap locks $ \o' m -> return $
+incObject :: UId -> OId -> Maybe A.Value -> PacketEnv -> IO Result
+incObject uid oid (Just (A.Object o)) PacketEnv{..} =
+    withLockedObject uid oid pObjects pLocks $ \o' m -> return $
         case updates o' of
           Nothing  -> (m, errorResult "Invalid increment")
           Just kvs -> let new = foldl' insert o' kvs in
@@ -248,7 +243,7 @@ incObject uid oid (Just (A.Object o)) omap locks =
     updates m = mapM (inc m) $ M.toList o
     inc m (k,v) = (,) k <$> join (flip incValue v <$> M.lookup k m)
     insert m (k,v) = M.insert k v m
-incObject _ _ _ _ _ = return $ errorResult "The value must be an object"
+incObject _ _ _ _ = return $ errorResult "The value must be an object"
 
 -- | attempt to combine two A.Values
 incValue :: A.Value -> A.Value -> Maybe A.Value
@@ -292,8 +287,8 @@ connectUser client@Client{..} umap =
         Just _  -> (m, False) 
 
 disconnectUser :: UId -> ServerEnv -> IO ()
-disconnectUser uid env@ServerEnv{..} = do
-    sendNotifications env 
+disconnectUser uid ServerEnv{..} = do
+    sendNotifications sSubs sUsers 
         (Packet Nothing ["u", getUId uid] "disconnect" Nothing Nothing)
         [AllUsersSub]
     modifyMVar_ sUsers $ return . M.delete uid
@@ -302,18 +297,17 @@ disconnectUser uid env@ServerEnv{..} = do
     modifyMVar_ sLocks $ \l -> return $
       foldl' (flip Ix.delete) l (Ix.toList $ Ix.getEQ uid l)
 
-getUsers :: MVar UserMap -> IO [UId]
-getUsers umap = M.keys <$> readMVar umap
+getUsers :: PacketEnv -> IO [UId]
+getUsers env = M.keys <$> readMVar (pUsers env)
 
-msgUser :: Packet -> UId -> Client -> MVar UserMap -> IO Result
-msgUser p uid (Client fuid _) umap = do
-    mclient <- M.lookup uid <$> readMVar umap
+msgUser :: UId -> PacketEnv -> IO Result
+msgUser uid PacketEnv{..} = do
+    mclient <- M.lookup uid <$> readMVar pUsers
     case mclient of
       Nothing                    -> return $ errorResult "No such user id"
       Just (Client _ HTTPClient) -> return $ errorResult "Can't message HTTP clients"
       Just client                -> do
-          sendPacket client (p { pId = Nothing
-                               , pEndpoint = ["u", getUId fuid]
+          sendPacket client (pPacket { pId = Nothing
+                               , pEndpoint = ["u", getUId (cUId pClient)]
                                })
           return $ OK NoNotifications true 
-      
