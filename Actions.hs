@@ -46,6 +46,12 @@ maybeResult err m = do
     Nothing -> errorResult err
     Just x  -> OK NoNotifications (A.toJSON x)
 
+okResult :: (A.ToJSON a) =>  a -> Result
+okResult = OK NoNotifications . A.toJSON
+
+addError :: Text -> Packet -> Packet
+addError err p = p { pError = Just $ A.String err }
+
 -------------------------------------------------------------------------------
 -- Subscriptions
 
@@ -84,14 +90,25 @@ sendPacket _ _ = return ()
 -------------------------------------------------------------------------------
 -- Subscriptions
 
+-- currently subs to objects that don't exist are allowed, and subs aren't
+-- deleted when an object is deleted
 addSub :: PacketEnv -> SubType -> IO Result
-addSub env@PacketEnv{..} st = do
-    sendInitialUpdate env st
-    modifyMVar_ sSubs $ \s -> return $
-        Ix.insert (SubEntry (cUserId pClient) st) s
-    return $ OK NoNotifications true
+addSub env@PacketEnv{..} st = 
+    case cHandle pClient of
+        HTTPClient -> return $ errorResult "HTTP clients can't subscribe"
+        _          -> do
+            sendInitialUpdate env st
+            modifyMVar_ (sSubs pServerEnv) $ \s -> return $
+                Ix.insert entry (Ix.delete entry s) -- prevent dups
+            return $ OK NoNotifications true
   where
-    ServerEnv{..} = pServerEnv
+    entry = SubEntry (cUserId pClient) st
+
+unSub :: PacketEnv -> SubType -> IO Result
+unSub PacketEnv{..} st = do
+    modifyMVar_ (sSubs pServerEnv) $ \s -> return $
+        Ix.delete (SubEntry (cUserId pClient) st) s
+    return $ OK NoNotifications true
 
 sendInitialUpdate :: PacketEnv -> SubType -> IO ()
 sendInitialUpdate PacketEnv{..} st =
@@ -101,22 +118,21 @@ sendInitialUpdate PacketEnv{..} st =
         forM_ uids $ \u -> sendPacket pClient $ 
             Packet Nothing ["u",u] "connect" Nothing Nothing
       AllObjectsSub -> do
-        oids <- getObjects sObjects
-        forM_ oids $ \oid -> sendObj oid 
-      ObjectSub oid -> sendObj oid 
+        objs <- getObjects sObjects
+        mapM_ sendObj objs
+      ObjectSub oid -> do
+        obj <- getObject oid sObjects
+        maybe (return ()) sendObj obj
       FileSub fp -> do
         files <- listFiles fp
         forM_ files $ \f -> sendPacket pClient $
             Packet Nothing (fpToEndpoint $ fp </> f) "create" Nothing Nothing
   where
     ServerEnv{..} = pServerEnv
-    sendObj oid = do
-        obj <- getObject oid sObjects 
-        case obj of
-          Nothing -> return () -- object doesn't exist yet
-          _ -> sendPacket pClient $ 
-              Packet Nothing ["o",oid] "create" (A.toJSON <$> obj) Nothing
-
+    sendObj o = case M.lookup "id" o of
+        Just (A.String oid) -> sendPacket pClient $
+            Packet Nothing ["o",oid] "create" (Just $ A.Object o) Nothing
+        _   -> return ()
 
 
 -------------------------------------------------------------------------------
@@ -126,15 +142,16 @@ createObject :: ObjectId -> Maybe A.Value -> MVar ObjectMap -> IO Result
 createObject oid (Just (A.Object o)) omap =
     modifyMVar omap $ \m ->
         return $ case M.lookup oid m of
-          Nothing -> (M.insert oid o m, OK (ObjectCreated oid) (A.toJSON o))
+          Nothing -> (M.insert oid o' m, OK (ObjectCreated oid) (A.toJSON o'))
           Just _  -> (m, errorResult "That object id already exists")
+  where o' = M.insert "id" (A.toJSON oid) o -- insert oid as "id" prop
 createObject _ _ _ = return $ errorResult "The initial value must be an object"
   
 getObject :: ObjectId -> MVar ObjectMap -> IO (Maybe A.Object)
 getObject oid omap = M.lookup oid <$> readMVar omap
 
-getObjects :: MVar ObjectMap -> IO [ObjectId]
-getObjects omap = M.keys <$> readMVar omap
+getObjects :: MVar ObjectMap -> IO [A.Object]
+getObjects omap = M.elems <$> readMVar omap
 
 getObjectProp :: ObjectId -> Text -> MVar ObjectMap -> IO Result
 getObjectProp oid prop omap = do
@@ -166,9 +183,6 @@ setObjectProp oid prop (Just v) omap =
         Just o' -> (M.insert oid (M.insert prop v o') m, OK (ObjectUpdated oid) v)
 setObjectProp _ _ _ _ = return $ errorResult "Nothing to set"
 
--- delete object
--- send deleted notification
--- delete object subs (should notifications handle this?)
 deleteObject :: ObjectId -> MVar ObjectMap -> IO Result
 deleteObject oid omap =
     modifyMVar omap $ \m ->
@@ -241,26 +255,27 @@ connectUser client@Client{..} umap =
         Nothing -> (M.insert cUserId client m, True)
         Just _  -> (m, False) 
 
-disconnectUser :: UserId -> MVar UserMap -> IO Result
-disconnectUser uid umap = do
-    res <- modifyMVar umap $ \m ->
-      return $ case M.lookup uid m of
-        Nothing -> (m, False)
-        Just _  -> (M.delete uid m, True) 
-    return $ if res
-      then OK (UserDisconnected uid) true 
-      else errorResult "No such user id"
+disconnectUser :: UserId -> ServerEnv -> IO ()
+disconnectUser uid env@ServerEnv{..} = do
+    sendNotifications env 
+        (Packet Nothing ["u", uid] "disconnect" Nothing Nothing)
+        [AllUsersSub]
+    modifyMVar_ sUsers $ return . M.delete uid
+    modifyMVar_ sSubs $ \s -> return $
+      foldl' (flip Ix.delete) s (Ix.toList $ Ix.getEQ uid s)
 
 getUsers :: MVar UserMap -> IO [Text]
 getUsers umap = M.keys <$> readMVar umap
 
-msgUser :: Packet -> UserId -> MVar UserMap -> IO Result
-msgUser p uid umap = do
+msgUser :: Packet -> UserId -> Client -> MVar UserMap -> IO Result
+msgUser p uid (Client fuid _) umap = do
     mclient <- M.lookup uid <$> readMVar umap
     case mclient of
-      Nothing                    -> return $ errorResult "No such user id."
-      Just (Client _ HTTPClient) -> return $ errorResult "Can't message HTTP clients."
+      Nothing                    -> return $ errorResult "No such user id"
+      Just (Client _ HTTPClient) -> return $ errorResult "Can't message HTTP clients"
       Just client                -> do
-          sendPacket client (p { pId = Nothing })
+          sendPacket client (p { pId = Nothing
+                               , pEndpoint = ["u", fuid]
+                               })
           return $ OK NoNotifications true 
       

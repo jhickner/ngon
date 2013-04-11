@@ -18,7 +18,7 @@ import qualified Data.Text as T
 import Data.Aeson (Object, Value(..), object, ToJSON(..), FromJSON(..), (.=), (.:?), (.:))
 -- import Data.Attoparsec.Text
 import Data.Monoid
-import Data.Maybe (fromMaybe)
+import Data.Maybe (isJust, fromMaybe)
 
 type ObjectId = Text
 type UserId   = Text
@@ -69,14 +69,12 @@ data Packet = Packet
     , pError    :: Maybe Value
     } deriving (Show, Eq)
 
+hasId :: Packet -> Bool
+hasId = isJust . pId
 
 type EndpointComponent = Text
 
 instance FromJSON Packet where
-  -- parseJSON (Object o) = Packet <$> o .:? "id"
-                                -- <*> (map T.strip . T.split (=='/') <$> o .: "e")
-                                -- <*> o .:? "p"
-                                -- <*> o .:? "err"
   parseJSON (Object o) = do
       id' <- o .:? "id"
       e   <- map T.strip . T.split (=='/') <$> o .: "e" 
@@ -100,16 +98,6 @@ instance ToJSON Packet where
     where
       maybeField _ Nothing     = mempty
       maybeField name (Just a) = [name .= a]
-
-
-{-
-endpointComponents :: Parser [EndpointComponent]
-endpointComponents = many1 $ char '/' *> component <|> component
-  where component = Num <$> decimal <|> Str <$> takeWhile1 (/= '/') 
--}
-
-isOKResult (OK _ _) = True
-isOKResult _        = False
 
 data Result 
   = OK Notifications Value

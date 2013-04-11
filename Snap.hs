@@ -1,8 +1,7 @@
 {-# LANGUAGE OverloadedStrings, RecordWildCards #-}
 
--- send notification on socket and websocket disconnect
--- cleanup client on disconnect
--- unsub
+-- send notification on websocket disconnect
+-- locking
 
 -- can't do uploads and stuff from elm (fay?)
 -- check out bacon.js
@@ -51,19 +50,16 @@ import qualified Data.Aeson.Parser as P
 import qualified Data.Aeson as A
 import Data.Aeson (encode)
 
-import Data.Maybe (isJust, fromJust)
+import Data.Maybe (fromJust)
 
 import Types
 import Actions
 
 
-mkResponse :: Packet -> Result -> Packet
-mkResponse p (Error v) = p { pPayload = Nothing, pError = Just v }
-mkResponse p (OK _ v)  = p { pPayload = Just v }
+-------------------------------------------------------------------------------
+-- Packet Processing
 
-addError :: Text -> Packet -> Packet
-addError err p = p { pError = Just $ A.String err }
-
+-- | returns a Client if the connect packet is accepted
 runConnectPacket :: ServerEnv -> ClientHandle -> Packet -> IO (Maybe Client)
 runConnectPacket env chandle p@Packet{..} =
     case pEndpoint of
@@ -71,24 +67,35 @@ runConnectPacket env chandle p@Packet{..} =
             let client = Client uid chandle
             ok <- connectUser client (sUsers env)
             if ok
-              then return $ Just client
+              then do
+                  sendConnect uid 
+                  when (hasId p) $ 
+                      sendPacket client $ p { pPayload = Just true }
+                  return $ Just client
               else do
-                  sendPacket client $ addError "That user id is already connected" p
+                  when (hasId p) $ 
+                      sendPacket client $ addError "User id already in use" p
                   return Nothing
-        _          -> do
+        _ -> do
             let client = Client "unknown" chandle
             sendPacket client $ addError "Connect first" p
             return Nothing
+  where
+    sendConnect uid = sendNotifications env 
+                        (Packet Nothing ["u", uid] "connect" Nothing Nothing)
+                        [AllUsersSub]
 
 runPacket :: PacketEnv -> IO (Maybe Packet)
 runPacket env = do
     res <- dispatch env
     notify env res
-    return $ if shouldRespond p
-      then Just $ mkResponse p res
-      else Nothing
-  where p = pPacket env
-        shouldRespond = isJust . pId
+    return $ if hasId p
+               then Just $ mkResponse res
+               else Nothing
+  where 
+    p = pPacket env
+    mkResponse (Error v) = p { pPayload = Nothing, pError = Just v }
+    mkResponse (OK _ v)  = p { pPayload = Just v }
 
 dispatch :: PacketEnv -> IO Result
 dispatch env@PacketEnv{..} = d pEndpoint pAction
@@ -97,6 +104,7 @@ dispatch env@PacketEnv{..} = d pEndpoint pAction
     ServerEnv{..} = pServerEnv
 
     -- Object commands
+    d ["o"] "get"             = okResult <$> getObjects sObjects
     d ["o", oid] "create"     = createObject oid pPayload sObjects
     d ["o", oid] "get"        = maybeResult "No such object id" $ getObject oid sObjects
     d ["o", oid] "set"        = mergeObject oid pPayload sObjects
@@ -107,11 +115,11 @@ dispatch env@PacketEnv{..} = d pEndpoint pAction
     d ["o", oid, prop] "inc"  = incObjectProp oid prop pPayload sObjects
 
     -- User commands
-    d ["u"]      "get"        = OK NoNotifications . A.toJSON <$> getUsers sUsers
-    d ["u", uid] "set"        = msgUser pPacket uid sUsers
+    d ["u"]      "get"        = okResult <$> getUsers sUsers
+    d ["u", uid] "set"        = msgUser pPacket uid pClient sUsers
 
     -- File commands
-    d ("f":p)    "get"        = OK NoNotifications . A.toJSON <$> listFiles (mkPath p)
+    d ("f":p)    "get"        = okResult <$> listFiles (mkPath p)
     d ("f":p)    "delete"     = deleteFile (mkPath p)
 
     -- Subscription commands
@@ -119,6 +127,11 @@ dispatch env@PacketEnv{..} = d pEndpoint pAction
     d ["o", oid] "sub"        = addSub env (ObjectSub oid)
     d ["u"]      "sub"        = addSub env AllUsersSub
     d ("f":p)    "sub"        = addSub env (FileSub $ mkPath p)
+
+    d ["o"]      "unsub"      = unSub env AllObjectsSub
+    d ["o", oid] "unsub"      = unSub env (ObjectSub oid)
+    d ["u"]      "unsub"      = unSub env AllUsersSub
+    d ("f":p)    "unsub"      = unSub env (FileSub $ mkPath p)
 
     d _ _                     = return $ errorResult "No such endpoint"
     
@@ -131,11 +144,15 @@ webAPI env = do
                               <*> parseAction
                               <*> parsePayload
                               <*> return Nothing
-    mpacket <- liftIO $ runPacket $ PacketEnv env httpClient packet
-    respond' mpacket
+    rpacket <- (fromJust <$>) . liftIO $ runPacket $ PacketEnv env httpClient packet
+    writeJSON $ mplus (pError rpacket) (pPayload rpacket)
   where
     parseEndpoint = map T.pack . splitDirectories
-    respond' = writeJSON . fromJust
+
+writeJSON :: A.ToJSON a => a -> Snap ()
+writeJSON a = do 
+    modifyResponse $ setHeader "Content-Type" "application/json"
+    writeLBS . A.encode $ a
 
 parsePayload :: Snap (Maybe A.Value)
 parsePayload = do
@@ -159,6 +176,33 @@ parseAction = do
            POST   -> return "set"
            DELETE -> return "delete"
            _      -> pass   
+
+handleUploads :: ServerEnv -> Snap ()
+handleUploads env = method POST $ do
+      (tmp, rel, full) <- getPaths
+      mkDirP full
+      handleFileUploads tmp policy 
+          (const $ allowWithMaximumSize maxSize) $ 
+              mapM_ (handler rel full)
+  where
+    getPaths = do
+        tmp <- liftIO getTemporaryDirectory
+        pwd <- liftIO getCurrentDirectory
+        rel <- getSafePath
+        return (tmp, rel, pwd </> fileRoot </> rel)
+    mkDirP    = liftIO . createDirectoryIfMissing True
+    maxSize   = 1024 * 1000 * 100
+    packet fp = Packet Nothing (fpToEndpoint fp) "create" Nothing Nothing
+    policy    = setMaximumFormInputSize maxSize defaultUploadPolicy
+    handler rel full (info, res) = case res of
+        Left _    -> return ()
+        Right tfp -> case partFileName info of  
+            Nothing -> return ()
+            Just fn -> liftIO $ do
+                renameFile tfp (full </> fn')
+                sendNotifications env (packet $ rel </> fn') 
+                  [FileSub rel]
+              where fn' = B.unpack fn
 
 -------------------------------------------------------------------------------
 -- WebSocket API
@@ -186,23 +230,22 @@ webSocketDecoder action = loop
               case res of
                 Nothing -> loop
                 Just b  -> return b
-              
 
 -------------------------------------------------------------------------------
 -- Socket API
 
-runSocketServer env =
+runSocketServer env@ServerEnv{..} =
     serveFork (Host "127.0.0.1") "8001" $ \(sock, _remoteAddr) -> do
         mclient <- socketDecoder sock $ runConnectPacket env (SocketClient sock)
         case mclient of
           Nothing     -> return () -- disconnected
-          Just client -> flip finally (cleanup env client) $ 
+          Just client -> flip finally (cleanup client) $ 
               void $ socketDecoder sock $ \p -> do
                   mrpacket <- runPacket $ PacketEnv env client p
                   maybe (return ()) (sendAll sock . toStrict . encode) mrpacket
                   return Nothing
   where
-    cleanup _ _ = return ()
+    cleanup Client{..} = disconnectUser cUserId env
         
 -- | loop parsing JSON as long as action returns Nothing
 socketDecoder :: A.FromJSON a => Socket-> (a -> IO (Maybe b)) -> IO (Maybe b)
@@ -225,14 +268,8 @@ socketDecoder sock action = loop Nothing Nothing
                                               then Nothing 
                                               else Just bytes'
                   
-
 -------------------------------------------------------------------------------
 -- Main
-
-writeJSON :: A.ToJSON a => a -> Snap ()
-writeJSON a = do 
-    modifyResponse $ setHeader "Content-Type" "application/json"
-    writeLBS . A.encode $ a
 
 config = 
     setPort 8000 .
@@ -249,31 +286,6 @@ runWebServer env = httpServe config (route routes) where
              , ("/files", serveDirectory fileRoot)
              , ("/", serveDirectory "static")
              ]
-
-handleUploads :: ServerEnv -> Snap ()
-handleUploads env = method POST $ do
-      tmp <- liftIO getTemporaryDirectory
-      pwd <- liftIO getCurrentDirectory
-      relPath  <- getSafePath
-      let fullPath = pwd </> fileRoot </> relPath
-      liftIO $ createDirectoryIfMissing True fullPath
-      handleFileUploads tmp policy 
-          (const $ allowWithMaximumSize maxSize) $ 
-              mapM_ (handler relPath fullPath)
-  where
-    maxSize = 1024 * 1000 * 100
-    handler relPath fullPath (info, res) = case res of
-        Left _    -> return ()
-        Right tfp -> case partFileName info of  
-            Nothing -> return ()
-            Just fn -> liftIO $ do
-                renameFile tfp (fullPath </> fn')
-                sendNotifications env (fpacket $ relPath </> fn') 
-                  [FileSub relPath]
-              where fn' = B.unpack fn
-    fpacket fp = Packet Nothing (fpToEndpoint fp) "create" Nothing Nothing
-    policy = setMaximumFormInputSize maxSize defaultUploadPolicy
-
 
 main :: IO ()
 main = do
