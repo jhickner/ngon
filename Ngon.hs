@@ -73,11 +73,11 @@ runConnectPacket ServerEnv{..} chandle p@Packet{..} =
                   return $ Just client
               else do
                   when (hasId p) $ 
-                      sendPacket client $ addError "User id already in use" p
+                      sendPacket client $ addE p "User id already in use"
                   return Nothing
         _ -> do
             let client = Client (UId "unknown") chandle
-            sendPacket client $ addError "Connect first" p
+            sendPacket client $ addE p "Connect first"
             return Nothing
   where
     sendConnect uid = sendNotifications sSubs sUsers
@@ -89,13 +89,12 @@ runPacket :: PacketEnv -> IO (Maybe Packet)
 runPacket env = do
     res <- dispatch env
     notify env res
-    return $ if hasId p
-               then Just $ mkResponse res
+    return $ if hasId (pPacket env)
+               then Just $ getP res
                else Nothing
   where 
-    p = pPacket env
-    mkResponse (Error v) = p { pPayload = Nothing, pError = Just v }
-    mkResponse (OK _ v)  = p { pPayload = Just v }
+    getP (Error p) = p
+    getP (OK _ p)  = p
 
 dispatch :: PacketEnv -> IO Result
 dispatch env@PacketEnv{..} = d pEndpoint pAction
@@ -104,9 +103,10 @@ dispatch env@PacketEnv{..} = d pEndpoint pAction
     Client{..} = pClient
 
     -- Object commands
-    d ["o"] "get"             = okResult <$> getObjects env
+    d ["o"] "get"             = okResult pPacket <$> getObjects env
     d ["o", oid] "create"     = createObject (OId oid) pPayload env
-    d ["o", oid] "get"        = maybeResult "No such object id" $ getObject (OId oid) env
+    d ["o", oid] "get"        = maybeResult pPacket "No such object id" $ 
+                                  getObject (OId oid) env
     d ["o", oid] "set"        = mergeObject cUId (OId oid) pPayload env
     d ["o", oid] "inc"        = incObject cUId (OId oid) pPayload env
 
@@ -118,12 +118,12 @@ dispatch env@PacketEnv{..} = d pEndpoint pAction
     d ["o", oid] "unlock"     = unlockObject cUId (OId oid) env
 
     -- User commands
-    d ["u"]      "get"        = okResult <$> getUsers env
+    d ["u"]      "get"        = okResult pPacket <$> getUsers env
     d ["u", uid] "set"        = msgUser (UId uid) env
 
     -- File commands
-    d ("f":p)    "get"        = okResult <$> listFiles (mkPath p)
-    d ("f":p)    "delete"     = deleteFile (mkPath p)
+    d ("f":p)    "get"        = okResult pPacket <$> listFiles (mkPath p)
+    d ("f":p)    "delete"     = deleteFile pPacket (mkPath p)
 
     -- Subscription commands
     d ["o"]      "sub"        = addSub env AllObjectsSub
@@ -136,7 +136,7 @@ dispatch env@PacketEnv{..} = d pEndpoint pAction
     d ["u"]      "unsub"      = unSub env AllUsersSub
     d ("f":p)    "unsub"      = unSub env (FileSub $ mkPath p)
 
-    d _ _                     = return $ errorResult "No such endpoint"
+    d _ _                     = return $ errorResult pPacket "No such endpoint"
     
 
 -------------------------------------------------------------------------------

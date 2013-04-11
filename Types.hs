@@ -123,8 +123,8 @@ instance ToJSON Packet where
       maybeField name (Just a) = [name .= a]
 
 data Result 
-  = OK Notifications Value
-  | Error Value 
+  = OK Notifications Packet
+  | Error Packet
     deriving (Show, Eq)
 
 data Notifications 
