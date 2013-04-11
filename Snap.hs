@@ -1,6 +1,5 @@
 {-# LANGUAGE OverloadedStrings, RecordWildCards #-}
 
--- send notification on websocket disconnect
 -- locking
 
 -- can't do uploads and stuff from elm (fay?)
@@ -23,18 +22,15 @@ import System.Exit (ExitCode(..))
 import Network.Socket (Socket)
 import Network.Socket.ByteString (recv, sendAll)
 
-import TCP
+import qualified Network.WebSockets as WS
+import Network.WebSockets.Snap
 
---import Control.Monad
 import Control.Concurrent.MVar
 import Control.Monad.IO.Class
 import Control.Monad
 import Control.Applicative
 import Control.Concurrent
 import Control.Exception (finally)
-
-import qualified Network.WebSockets as WS
-import Network.WebSockets.Snap
 
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -52,6 +48,7 @@ import Data.Aeson (encode)
 
 import Data.Maybe (fromJust)
 
+import TCP
 import Types
 import Actions
 
@@ -59,7 +56,9 @@ import Actions
 -------------------------------------------------------------------------------
 -- Packet Processing
 
--- | returns a Client if the connect packet is accepted
+-- | Initial packet handler for new clients. Only accepts packets with endpoint
+-- "u/username" and attempts to connect them. Loops until a successful
+-- connection and then returns a 'Client' object.
 runConnectPacket :: ServerEnv -> ClientHandle -> Packet -> IO (Maybe Client)
 runConnectPacket env chandle p@Packet{..} =
     case pEndpoint of
@@ -85,6 +84,7 @@ runConnectPacket env chandle p@Packet{..} =
                         (Packet Nothing ["u", uid] "connect" Nothing Nothing)
                         [AllUsersSub]
 
+-- | Packet handler for connected clients.
 runPacket :: PacketEnv -> IO (Maybe Packet)
 runPacket env = do
     res <- dispatch env
@@ -212,10 +212,15 @@ wsAPI env rq = do
     WS.acceptRequest rq
     sink <- WS.getSink
     client <- webSocketDecoder $ runConnectPacket env (WebSocketClient sink)
-    webSocketDecoder $ \p -> do
-        mrpacket <- runPacket $ PacketEnv env client p
-        maybe (return ()) (WS.sendSink sink . WS.textData . encode) mrpacket
-        return Nothing
+    flip WS.catchWsError (handler client) $
+        webSocketDecoder $ \p -> do
+            mrpacket <- runPacket $ PacketEnv env client p
+            maybe (return ()) (WS.sendSink sink . WS.textData . encode) mrpacket
+            return Nothing
+  where
+    handler client e = liftIO $ do
+        print e 
+        disconnectUser (cUserId client) env
 
 -- | loop parsing JSON as long as action returns Nothing
 webSocketDecoder :: A.FromJSON a => (a -> IO (Maybe b)) -> WS b
@@ -245,7 +250,7 @@ runSocketServer env@ServerEnv{..} =
                   maybe (return ()) (sendAll sock . toStrict . encode) mrpacket
                   return Nothing
   where
-    cleanup Client{..} = disconnectUser cUserId env
+    cleanup client = disconnectUser (cUserId client) env
         
 -- | loop parsing JSON as long as action returns Nothing
 socketDecoder :: A.FromJSON a => Socket-> (a -> IO (Maybe b)) -> IO (Maybe b)

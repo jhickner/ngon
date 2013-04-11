@@ -134,6 +134,9 @@ sendInitialUpdate PacketEnv{..} st =
             Packet Nothing ["o",oid] "create" (Just $ A.Object o) Nothing
         _   -> return ()
 
+-------------------------------------------------------------------------------
+-- Object Locks
+
 
 -------------------------------------------------------------------------------
 -- Objects
@@ -222,6 +225,7 @@ incValue (A.Array a)  (A.Array b)  = Just . A.Array  $ a <> b
 incValue (A.Array a)  b            = Just . A.Array  $ a <> V.fromList [b]
 incValue (A.Number a) (A.Number b) = Just . A.Number $ a +  b
 incValue _ _ = Nothing
+
 
 -------------------------------------------------------------------------------
 -- Files

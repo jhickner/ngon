@@ -30,6 +30,7 @@ type SubSet = IxSet SubEntry
 data ServerEnv = ServerEnv
   { sUsers   :: MVar UserMap
   , sObjects :: MVar ObjectMap
+  , sLocks   :: MVar LockSet
   , sSubs    :: MVar SubSet
   }
 
@@ -131,4 +132,13 @@ data SubEntry = SubEntry
 instance Indexable SubEntry where
     empty = ixSet [ ixFun $ \(SubEntry uid _) -> [uid]
                   , ixFun $ \(SubEntry _ st)  -> [st] 
+                  ]
+
+type LockSet = IxSet Lock
+
+data Lock = Lock UserId ObjectId deriving (Show, Eq, Data, Typeable)
+
+instance Indexable Lock where
+    empty = ixSet [ ixFun $ \(Lock uid _) -> [uid]
+                  , ixFun $ \(Lock _ oid) -> [oid]
                   ]
