@@ -243,7 +243,7 @@ incObject uid oid (Just (A.Object o)) omap locks =
         case updates o' of
           Nothing  -> (m, errorResult "Invalid increment")
           Just kvs -> let new = foldl' insert o' kvs in
-              (M.insert oid new m, OK (ObjectUpdated oid) (A.toJSON new))
+              (M.insert oid new m, OK (ObjectUpdated oid) (A.toJSON $ M.fromList kvs))
   where
     updates m = mapM (inc m) $ M.toList o
     inc m (k,v) = (,) k <$> join (flip incValue v <$> M.lookup k m)
