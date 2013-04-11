@@ -6,7 +6,7 @@
 -- https://github.com/raimohanska/bacon.js/wiki/Documentation
 -- use elm example to make a bacon websocket
 
-module Snap where
+module Main where
 
 import Snap.Core
 import Snap.Http.Server
