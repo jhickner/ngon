@@ -104,17 +104,17 @@ instance FromJSON Packet where
       a   <- (T.toLower <$>) <$> o .:? "a"
       p   <- o .:? "p"
       err <- o .:? "err"
-      let defaultAction = case p of
-                            Nothing -> "get"
-                            _       -> "set"
-      return $ Packet id' e (fromMaybe defaultAction a) p err 
+      return $ Packet id' e (action p a) p err 
+    where
+      action p = fromMaybe (maybe "get" (const "set") p)
   parseJSON _ = mzero
 
 instance ToJSON Packet where
   toJSON Packet{..} = object $ mconcat 
     [ maybeField "id" pId
     , ["e" .= T.intercalate "/" pEndpoint]
-    , ["a" .= pAction]
+    -- trim set and get since they can inferred
+    , if pAction `elem` ["set", "get"] then mempty else ["a" .= pAction]
     , maybeField "p" pPayload
     , maybeField "err" pError
     ]
@@ -132,6 +132,8 @@ data Notifications
   | ObjectUpdated OId
   | ObjectCreated OId
   | ObjectDeleted OId
+  | ObjectLocked OId
+  | ObjectUnlocked OId
   | UserDisconnected UId
   | UserConnected UId
   | FileDeleted FilePath

@@ -167,16 +167,14 @@ wsAPI env rq = do
             maybe (return ()) (WS.sendSink sink . WS.textData . encode) mrpacket
             return Nothing
   where
-    handler client e = liftIO $ do
-        print e 
-        disconnectUser (cUId client) env
+    handler client _e = liftIO $ disconnectUser (cUId client) env
 
 -- | loop parsing JSON as long as action returns Nothing
 webSocketDecoder :: A.FromJSON a => (a -> IO (Maybe b)) -> WS b
 webSocketDecoder action = loop
   where 
     loop = do
-        n <- WS.receiveData :: WS B.ByteString
+        n <- WS.receiveData
         case decodeStrict n of
           Nothing -> loop
           Just p  -> do
@@ -189,7 +187,7 @@ webSocketDecoder action = loop
 -- Socket API
 
 runSocketServer env@ServerEnv{..} =
-    serveFork (Host "127.0.0.1") "8001" $ \(sock, _remoteAddr) -> do
+    serveFork (Host "0.0.0.0") "8001" $ \(sock, _remoteAddr) -> do
         (bs, mclient) <- socketDecoder sock Nothing $ 
             runConnectPacket env (SocketClient sock)
         case mclient of

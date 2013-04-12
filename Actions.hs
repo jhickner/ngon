@@ -16,6 +16,7 @@ import Network.Socket.ByteString.Lazy (sendAll)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Aeson as A
+import Data.Aeson ((.=))
 import qualified Data.HashMap.Strict as M
 import qualified Data.Vector as V
 
@@ -63,10 +64,12 @@ notify PacketEnv{..} res =
     case res of
       Error{} -> return ()
       (OK n p) -> case n of
-        ObjectCreated _   -> send' p [AllObjectsSub]
-        ObjectUpdated oid -> send' p [AllObjectsSub, ObjectSub oid]
-        ObjectDeleted oid -> send' p [AllObjectsSub, ObjectSub oid]
-        FileDeleted fp    -> send' p [FileSub $ takeDirectory fp]
+        ObjectCreated _    -> send' p [AllObjectsSub]
+        ObjectUpdated oid  -> send' p [AllObjectsSub, ObjectSub oid]
+        ObjectDeleted oid  -> send' p [AllObjectsSub, ObjectSub oid]
+        ObjectLocked oid   -> send' p [AllObjectsSub, ObjectSub oid]
+        ObjectUnlocked oid -> send' p [AllObjectsSub, ObjectSub oid]
+        FileDeleted fp     -> send' p [FileSub $ takeDirectory fp]
         _ -> return ()
   where
     send' p = sendNotifications pSubs pUsers (p { pId = Nothing })
@@ -158,17 +161,22 @@ lockObject uid oid env@PacketEnv{..} =
     withObject oid env $ \_ m ->
         modifyMVar pLocks $ \l ->
           return $ case Ix.getOne (l @= oid) of
-            Just (Lock uid' _) | uid' == uid -> (l, (m, ok))
-            Nothing -> (Ix.insert (Lock uid oid) l, (m, ok))
+            Just (Lock uid' _) | uid' == uid -> 
+              (l, (m, okResult pPacket uid))
+            Nothing -> (Ix.insert (Lock uid oid) l, 
+              (m, OK (ObjectLocked oid) (addP pPacket uid)))
             Just _  -> (l, (m, errorResult pPacket "Object is already locked"))
-  where
-    ok = okResult pPacket true
 
 unlockObject :: UId -> OId -> PacketEnv -> IO Result
 unlockObject uid oid env@PacketEnv{..} = 
-    withObject oid env $ \_ m -> do
-        modifyMVar_ pLocks $ \l -> return $ Ix.delete (Lock uid oid) l
-        return (m, okResult pPacket true)
+    withObject oid env $ \_ m ->
+        modifyMVar pLocks $ \l ->
+          return $ case Ix.getOne (l @= oid) of
+            Just (Lock uid' _) | uid' == uid -> 
+              (Ix.delete (Lock uid oid) l, 
+                (m, OK (ObjectUnlocked oid) (addP pPacket true)))
+            Nothing -> (l, (m, errorResult pPacket "Object is already unlocked"))
+            Just _  -> (l, (m, errorResult pPacket "Object locked by another user"))
 
 -------------------------------------------------------------------------------
 -- Objects
@@ -206,39 +214,6 @@ getObjectProp oid prop env@PacketEnv{..} =
         Nothing -> (m, errorResult pPacket "No such key in object")
         Just v  -> (m, okResult pPacket v)
 
-incObjectProp :: UId -> OId -> Text -> Maybe A.Value 
-              -> PacketEnv -> IO Result
-incObjectProp uid oid prop (Just v) env@PacketEnv{..} =
-    withLockedObject uid oid env $ \o m -> return $
-      case M.lookup prop o of
-          Nothing -> (m, errorResult pPacket "No such key in object")
-          Just v' -> case incValue v' v of
-            Nothing  -> (m, errorResult pPacket "Invalid increment")
-            Just v'' -> (M.insert oid (M.insert prop v'' o) m, 
-                         OK (ObjectUpdated oid) 
-                         -- broadcast as a set to the incremented value
-                         (pPacket { pAction = "set"
-                                  , pPayload = Just v''
-                                  }))
-incObjectProp _ _ _ _ env = return $ errorResult (pPacket env) "Nothing to inc"
-
-setObjectProp :: UId -> OId -> Text -> Maybe A.Value -> PacketEnv -> IO Result
-setObjectProp uid oid prop (Just v) env@PacketEnv{..} =
-    withLockedObject uid oid env $ \o m -> return
-        (M.insert oid (M.insert prop v o) m, OK (ObjectUpdated oid) (addP pPacket v))
-setObjectProp _ _ _ _ env = return $ errorResult (pPacket env) "Nothing to set"
-
-deleteObject :: UId -> OId -> PacketEnv -> IO Result
-deleteObject uid oid env@PacketEnv{..} =
-    withLockedObject uid oid env $ \_ m -> return
-        (M.delete oid m, OK (ObjectDeleted oid) (addP pPacket true))
-
-mergeObject :: UId -> OId -> Maybe A.Value -> PacketEnv -> IO Result
-mergeObject uid oid (Just (A.Object o)) env@PacketEnv{..} =
-    withLockedObject uid oid env $ \o' m -> let new = o <> o' in
-      return (M.insert oid new m, OK (ObjectUpdated oid) (addP pPacket new))
-mergeObject _ _ _ env = return $ errorResult (pPacket env) "The value must be an object"
-
 incObject :: UId -> OId -> Maybe A.Value -> PacketEnv -> IO Result
 incObject uid oid (Just (A.Object o)) env@PacketEnv{..} =
     withLockedObject uid oid env $ \o' m -> return $
@@ -256,6 +231,45 @@ incObject uid oid (Just (A.Object o)) env@PacketEnv{..} =
     insert m (k,v) = M.insert k v m
 incObject _ _ _ env = return $ errorResult (pPacket env) "The value must be an object"
 
+incObjectProp :: UId -> OId -> Text -> Maybe A.Value 
+              -> PacketEnv -> IO Result
+incObjectProp uid oid prop (Just v) env@PacketEnv{..} =
+    withLockedObject uid oid env $ \o m -> return $
+      case M.lookup prop o of
+          Nothing -> (m, errorResult pPacket "No such key in object")
+          Just v' -> case incValue v' v of
+            Nothing  -> (m, errorResult pPacket "Invalid increment")
+            Just v'' -> (M.insert oid (M.insert prop v'' o) m, 
+                         OK (ObjectUpdated oid) 
+                         -- broadcast as a set to the incremented value
+                         (pPacket { pAction = "set"
+                                  , pEndpoint = ["o", getOId oid]
+                                  , pPayload = Just $ A.object [prop .= v'']
+                                  }))
+incObjectProp _ _ _ _ env = return $ errorResult (pPacket env) "Nothing to inc"
+
+mergeObject :: UId -> OId -> Maybe A.Value -> PacketEnv -> IO Result
+mergeObject uid oid (Just (A.Object o)) env@PacketEnv{..} =
+    withLockedObject uid oid env $ \o' m -> let new = o <> o' in
+      return (M.insert oid new m, OK (ObjectUpdated oid) (addP pPacket new))
+mergeObject _ _ _ env = return $ errorResult (pPacket env) "The value must be an object"
+
+setObjectProp :: UId -> OId -> Text -> Maybe A.Value -> PacketEnv -> IO Result
+setObjectProp uid oid prop (Just v) env@PacketEnv{..} =
+    withLockedObject uid oid env $ \o m -> return
+        (M.insert oid (M.insert prop v o) m, 
+          OK (ObjectUpdated oid) 
+          -- drop property from endpoint
+          (pPacket { pEndpoint = ["o", getOId oid]
+                   , pPayload = Just $ A.object [prop .= v] 
+                   }))
+setObjectProp _ _ _ _ env = return $ errorResult (pPacket env) "Nothing to set"
+
+deleteObject :: UId -> OId -> PacketEnv -> IO Result
+deleteObject uid oid env@PacketEnv{..} =
+    withLockedObject uid oid env $ \_ m -> return
+        (M.delete oid m, OK (ObjectDeleted oid) (addP pPacket true))
+
 -- | attempt to combine two A.Values
 incValue :: A.Value -> A.Value -> Maybe A.Value
 incValue (A.String a) (A.String b) = Just . A.String $ a <> b
@@ -263,7 +277,6 @@ incValue (A.Array a)  (A.Array b)  = Just . A.Array  $ a <> b
 incValue (A.Array a)  b            = Just . A.Array  $ a <> V.fromList [b]
 incValue (A.Number a) (A.Number b) = Just . A.Number $ a +  b
 incValue _ _ = Nothing
-
 
 -------------------------------------------------------------------------------
 -- Files

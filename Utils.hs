@@ -6,6 +6,8 @@ import qualified Data.Aeson as A
 import qualified Data.Aeson.Parser as P
 import qualified Data.Attoparsec as PB
 
+import Debug.Trace
+
 toStrict :: BL.ByteString -> B.ByteString
 toStrict = B.concat . BL.toChunks
 
@@ -23,3 +25,15 @@ decodeStrict bs =
       Right v -> case A.fromJSON v of
                    A.Success a -> Just a
                    _           -> Nothing
+
+{-
+tap x = traceShow x x
+
+decodeStrict :: A.FromJSON a => B.ByteString -> Maybe a
+decodeStrict bs = 
+    case PB.maybeResult $ PB.feed (PB.parse P.json' (tap bs)) B.empty of
+      Just v -> case A.fromJSON v of
+                   A.Success a -> Just a
+                   _           -> Nothing
+      _ -> Nothing
+-}
