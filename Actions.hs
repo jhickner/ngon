@@ -47,8 +47,11 @@ maybeResult p err m = do
     Nothing -> Error $ addE p err
     Just x  -> OK NoNotifications $ addP p x
 
-okResult :: (A.ToJSON a) => Packet -> a-> Result
+okResult :: (A.ToJSON a) => Packet -> a -> Result
 okResult p v = OK NoNotifications $ addP p v
+
+ok :: Packet -> Result
+ok = OK NoNotifications
 
 addP :: A.ToJSON a => Packet -> a -> Packet
 addP p v = p { pPayload = Just $ A.toJSON v } 
@@ -69,7 +72,7 @@ notify PacketEnv{..} res =
         ObjectDeleted oid  -> send' p [AllObjectsSub, ObjectSub oid]
         ObjectLocked oid   -> send' p [AllObjectsSub, ObjectSub oid]
         ObjectUnlocked oid -> send' p [AllObjectsSub, ObjectSub oid]
-        FileDeleted fp     -> send' p [FileSub $ takeDirectory fp]
+        FileDeleted fp     -> send' p [FileSub fp]
         _ -> return ()
   where
     send' p = sendNotifications pSubs pUsers (p { pId = Nothing })
@@ -106,7 +109,7 @@ addSub env@PacketEnv{..} st =
             sendInitialUpdate env st
             modifyMVar_ pSubs $ \s -> return $
                 Ix.insert entry (Ix.delete entry s) -- prevent dups
-            return $ okResult pPacket true
+            return $ ok pPacket
   where
     entry = SubEntry (cUId pClient) st
 
@@ -114,7 +117,7 @@ unSub :: PacketEnv -> SubType -> IO Result
 unSub PacketEnv{..} st = do
     modifyMVar_ pSubs $ \s -> return $
         Ix.delete (SubEntry (cUId pClient) st) s
-    return $ okResult pPacket true
+    return $ ok pPacket
 
 sendInitialUpdate :: PacketEnv -> SubType -> IO ()
 sendInitialUpdate env@PacketEnv{..} st =
@@ -174,7 +177,7 @@ unlockObject uid oid env@PacketEnv{..} =
           return $ case Ix.getOne (l @= oid) of
             Just (Lock uid' _) | uid' == uid -> 
               (Ix.delete (Lock uid oid) l, 
-                (m, OK (ObjectUnlocked oid) (addP pPacket true)))
+                (m, OK (ObjectUnlocked oid) pPacket))
             Nothing -> (l, (m, errorResult pPacket "Object is already unlocked"))
             Just _  -> (l, (m, errorResult pPacket "Object locked by another user"))
 
@@ -251,7 +254,7 @@ incObjectProp _ _ _ _ env = return $ errorResult (pPacket env) "Nothing to inc"
 mergeObject :: UId -> OId -> Maybe A.Value -> PacketEnv -> IO Result
 mergeObject uid oid (Just (A.Object o)) env@PacketEnv{..} =
     withLockedObject uid oid env $ \o' m -> let new = o <> o' in
-      return (M.insert oid new m, OK (ObjectUpdated oid) (addP pPacket new))
+      return (M.insert oid new m, OK (ObjectUpdated oid) (addP pPacket o))
 mergeObject _ _ _ env = return $ errorResult (pPacket env) "The value must be an object"
 
 setObjectProp :: UId -> OId -> Text -> Maybe A.Value -> PacketEnv -> IO Result
@@ -268,7 +271,7 @@ setObjectProp _ _ _ _ env = return $ errorResult (pPacket env) "Nothing to set"
 deleteObject :: UId -> OId -> PacketEnv -> IO Result
 deleteObject uid oid env@PacketEnv{..} =
     withLockedObject uid oid env $ \_ m -> return
-        (M.delete oid m, OK (ObjectDeleted oid) (addP pPacket true))
+        (M.delete oid m, OK (ObjectDeleted oid) pPacket)
 
 -- | attempt to combine two A.Values
 incValue :: A.Value -> A.Value -> Maybe A.Value
@@ -297,7 +300,10 @@ listFiles fp = handle (ioE $ return []) $ listFiles' (fileRoot </> fp)
 deleteFile :: Packet -> FilePath -> IO Result
 deleteFile p fp = handle (ioErrorResult p) $ do
     removeFile (fileRoot </> fp)
-    return $ OK (FileDeleted fp) (addP p true)
+    return $ OK (FileDeleted rel) p
+  where rel = case splitDirectories fp of
+                      [_] -> ""
+                      fs  -> joinPath $ init fs
 
 
 -------------------------------------------------------------------------------
@@ -334,4 +340,4 @@ msgUser uid PacketEnv{..} = do
           sendPacket client (pPacket { pId = Nothing
                                , pEndpoint = ["u", getUId (cUId pClient)]
                                })
-          return $ OK NoNotifications (addP pPacket true) 
+          return $ ok pPacket
