@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>ThreeJS Demo</title>
+  <meta name="viewport" 
+    content="width=device-width, initial-scale=1, minimum-scale=1"/>
+  <meta name="apple-mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+  <style type="text/css">
+    body {
+      background-color: #121212;
+      margin:50;
+      padding:0;
+      overflow:hidden;
+    }
+    #uid { 
+      color:#333;
+      font-size:200px;
+      font-family:sans-serif;
+      position:absolute;
+    }
+  </style>
+</head>
+<body>
+  <div id="uid"></div>
+  <script src="three.min.js" type="text/javascript"></script>
+  <script src="ngon.js" type="text/javascript"></script>
+  <script type="text/javascript">
+    var camera, scene, renderer;
+    var geometry, material, mesh;
+    var rotX = 0;
+    var rotZ = 0;
+    var mScale = 1;
+    var color = "#121212";
+    var uidLabel = document.getElementById("uid");
+
+    function init() {
+      camera = new THREE.PerspectiveCamera( 
+          75, window.innerWidth / window.innerHeight, 1, 10000);
+      camera.position.z = 1000;
+      scene = new THREE.Scene();
+      geometry = new THREE.OctahedronGeometry(200, 1);
+      //geometry = new THREE.TorusKnotGeometry(100);
+      material = new THREE.MeshNormalMaterial();
+      mesh = new THREE.Mesh(geometry, material);
+      scene.add(mesh);
+      renderer = new THREE.CanvasRenderer();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      document.body.appendChild(renderer.domElement);
+    }
+
+    function animate() {
+      document.body.style.backgroundColor = color;
+      requestAnimationFrame(animate);
+      mesh.rotation.x = rotX;
+      mesh.rotation.z = rotZ;
+      mesh.scale = new THREE.Vector3(mScale, mScale, mScale);
+      renderer.render(scene, camera);
+    }
+
+    init();
+    animate();
+
+    NGON.connect({}, function() {
+      var cube = new NGON.Object('cube', {s:1, rx:0, rz:0});
+      cube.on('rx', function(rx) { rotX = rx; });
+      cube.on('rz', function(rz) { rotZ = rz; });
+      cube.on('s', function(s) { mScale = s; });
+      cube.on("lock", function (uid) { 
+        //color = "#222";
+        uidLabel.innerHTML = uid;
+      });
+      cube.on("unlock", function () { 
+        //color = "#121212";
+        uidLabel.innerHTML = "";
+      });
+
+      var i = new NGON.Interaction(window)
+      i.on("down", function () {cube.lock()});
+      i.on("up", function () {cube.unlock()});
+      i.on("move", function (d) {cube.inc({rx:d.deltaY/100, rz:d.deltaX/100})});
+    });
+  </script>
+</body>
+</html>

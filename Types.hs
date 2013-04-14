@@ -17,7 +17,7 @@ import Data.HashMap.Strict (HashMap)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Aeson (Object, Value(..), object, ToJSON(..), FromJSON(..), (.=), (.:?), (.:))
--- import Data.Attoparsec.Text
+
 import Data.Monoid
 import Data.Maybe (isJust, fromMaybe)
 
@@ -29,7 +29,6 @@ instance Hashable UId where hashWithSalt = hashUsing getUId
 
 instance ToJSON OId where toJSON (OId oid) = String oid
 instance ToJSON UId where toJSON (UId uid) = String uid
-
 
 type UserMap   = HashMap UId Client
 type ObjectMap = HashMap OId Object
@@ -69,7 +68,7 @@ instance Indexable Lock where
                   ]
 
 data Client = Client
-  { cUId :: UId
+  { cUId    :: UId
   , cHandle :: ClientHandle
   } deriving (Show, Eq)
 

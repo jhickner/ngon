@@ -1,5 +1,7 @@
 {-# LANGUAGE OverloadedStrings, RecordWildCards #-}
 
+-- build elm websocket
+
 -- check out bacon.js
 -- https://github.com/raimohanska/bacon.js/wiki/Documentation
 -- use elm example to make a bacon websocket
@@ -237,12 +239,12 @@ runConnectPacket ServerEnv{..} chandle p@Packet{..} =
     case pEndpoint of
         ["u", uid] -> do
             let client = Client (UId uid) chandle
-            ok <- connectUser client sUsers
-            if ok
+            isOK <- connectUser client sUsers
+            if isOK
               then do
                   sendConnect uid 
                   when (hasId p) $ 
-                      sendPacket client $ p { pPayload = Just true }
+                      sendPacket client p
                   return $ Just client
               else do
                   when (hasId p) $ 
@@ -278,6 +280,7 @@ dispatch env@PacketEnv{..} = d pEndpoint pAction
     -- Object commands
     d ["o"] "get"             = okResult pPacket <$> getObjects env
     d ["o", oid] "create"     = createObject (OId oid) pPayload env
+    d ["o", oid] "delete"     = deleteObject cUId (OId oid) env
     d ["o", oid] "get"        = maybeResult pPacket "No such object id" $ 
                                   getObject (OId oid) env
     d ["o", oid] "set"        = mergeObject cUId (OId oid) pPayload env
@@ -292,7 +295,8 @@ dispatch env@PacketEnv{..} = d pEndpoint pAction
 
     -- User commands
     d ["u"]      "get"        = okResult pPacket <$> getUsers env
-    d ["u", uid] "set"        = msgUser (UId uid) env
+    d ["u"]      _            = msgAllUsers env
+    d ["u", uid] _            = msgUser (UId uid) env
 
     -- File commands
     d ("f":p)    "get"        = okResult pPacket <$> listFiles (mkPath p)

@@ -26,10 +26,12 @@ import Data.IxSet ((@+), (@=))
 import Data.List (foldl')
 import Data.Monoid ((<>))
 import Data.Maybe (mapMaybe)
+
 import Types
 
-true :: A.Value
-true = A.Bool True
+
+-------------------------------------------------------------------------------
+-- Result combinators
 
 errorResult :: Packet -> Text -> Result
 errorResult p t = Error $ p { pError = Just $ A.String t }
@@ -37,15 +39,10 @@ errorResult p t = Error $ p { pError = Just $ A.String t }
 ioErrorResult :: Monad m => Packet -> IOException -> m Result
 ioErrorResult p e = return . Error $ addE p (T.pack $ show e)
 
-ioE :: Monad m => m a -> IOException -> m a
-ioE f _ = f 
-
 maybeResult :: (A.ToJSON a) => Packet -> Text -> IO (Maybe a) -> IO Result
 maybeResult p err m = do
-  r <- m
-  return $ case r of
-    Nothing -> Error $ addE p err
-    Just x  -> OK NoNotifications $ addP p x
+  v <- m
+  return $ maybe (errorResult p err) (okResult p) v
 
 okResult :: (A.ToJSON a) => Packet -> a -> Result
 okResult p v = OK NoNotifications $ addP p v
@@ -58,6 +55,9 @@ addP p v = p { pPayload = Just $ A.toJSON v }
 
 addE :: Packet -> Text -> Packet
 addE p err = p { pError = Just $ A.String err }
+
+ioE :: Monad m => m a -> IOException -> m a
+ioE f _ = f 
 
 -------------------------------------------------------------------------------
 -- Subscriptions
@@ -201,8 +201,8 @@ createObject oid (Just (A.Object o)) PacketEnv{..} =
           Nothing -> (M.insert oid o' m, OK (ObjectCreated oid) (addP pPacket o'))
           Just _  -> (m, errorResult pPacket "That object id already exists")
   where o' = M.insert "id" (A.toJSON oid) o -- insert oid as "id" prop
-createObject _ _ env = return $ errorResult (pPacket env) 
-    "The initial value must be an object"
+createObject _ _ env = return $ 
+    errorResult (pPacket env) "The initial value must be an object"
   
 getObject :: OId -> PacketEnv -> IO (Maybe A.Object)
 getObject oid env = M.lookup oid <$> readMVar (pObjects env)
@@ -330,6 +330,9 @@ disconnectUser uid ServerEnv{..} = do
 getUsers :: PacketEnv -> IO [UId]
 getUsers env = M.keys <$> readMVar (pUsers env)
 
+getClients :: PacketEnv -> IO [Client]
+getClients env = M.elems <$> readMVar (pUsers env)
+
 msgUser :: UId -> PacketEnv -> IO Result
 msgUser uid PacketEnv{..} = do
     mclient <- M.lookup uid <$> readMVar pUsers
@@ -337,7 +340,15 @@ msgUser uid PacketEnv{..} = do
       Nothing                    -> return $ errorResult pPacket "No such user id"
       Just (Client _ HTTPClient) -> return $ errorResult pPacket "Can't message HTTP clients"
       Just client                -> do
-          sendPacket client (pPacket { pId = Nothing
-                               , pEndpoint = ["u", getUId (cUId pClient)]
-                               })
+          sendPacket client p
           return $ ok pPacket
+  where
+    p = pPacket { pId = Nothing, pEndpoint = ["u", getUId (cUId pClient)] }
+
+msgAllUsers :: PacketEnv -> IO Result
+msgAllUsers env@PacketEnv{..} = do
+    getClients env >>= mapM_ (`sendPacket` p) 
+    return $ ok pPacket
+  where
+    p = pPacket { pId = Nothing, pEndpoint = ["u", getUId (cUId pClient)] }
+

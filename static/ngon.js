@@ -1,5 +1,6 @@
 (function(){
-  var EventDispatcher, Interaction, Socket, loc, h, N, Block, block;
+  var EventDispatcher, Uploader, DragDropTarget, DragDropUploader, Interaction, Socket, Object, slice$ = [].slice;
+  this.NGON = {};
   EventDispatcher = {
     on: function(name, fn){
       if (this.events == null) {
@@ -85,6 +86,90 @@
     }
   };
   EventDispatcher.addListener = EventDispatcher.on;
+  Uploader = (function(){
+    Uploader.displayName = 'Uploader';
+    var prototype = Uploader.prototype, constructor = Uploader;
+    function Uploader(file){
+      var fd, xhr, loc;
+      this.uploadCanceled = bind$(this, 'uploadCanceled', prototype);
+      this.uploadFailed = bind$(this, 'uploadFailed', prototype);
+      this.uploadComplete = bind$(this, 'uploadComplete', prototype);
+      this.uploadProgress = bind$(this, 'uploadProgress', prototype);
+      fd = new FormData;
+      fd.append('file', file);
+      xhr = new XMLHttpRequest;
+      xhr.upload.addEventListener('progress', this.uploadProgress, false);
+      xhr.addEventListener('load', this.uploadComplete, false);
+      xhr.addEventListener('lerror', this.uploadFailed, false);
+      xhr.addEventListener('abort', this.uploadCanceled, false);
+      loc = document.location;
+      xhr.open('POST', "http://" + loc.hostname + ":" + loc.port + "/files", true);
+      xhr.send(fd);
+    }
+    prototype.uploadProgress = function(e){
+      var pct;
+      if (e.lengthComputable) {
+        return pct = Math.round(e.loaded * 100 / e.total);
+      }
+    };
+    prototype.uploadComplete = function(e){
+      return console.log("upload complete!");
+    };
+    prototype.uploadFailed = function(e){
+      return console.log("upload failed!: " + e);
+    };
+    prototype.uploadCanceled = function(e){
+      return console.log("upload canceled!");
+    };
+    return Uploader;
+  }());
+  this.NGON.Uploader = Uploader;
+  DragDropTarget = (function(){
+    DragDropTarget.displayName = 'DragDropTarget';
+    var prototype = DragDropTarget.prototype, constructor = DragDropTarget;
+    function DragDropTarget(target, handler){
+      var this$ = this;
+      this.target = target;
+      this.handler = handler;
+      this.target.addEventListener('dragenter', function(e){
+        e.stopPropagation();
+        e.preventDefault();
+        return false;
+      });
+      this.target.addEventListener('dragover', function(e){
+        e.stopPropagation();
+        e.preventDefault();
+        return false;
+      });
+      this.target.addEventListener('drop', function(e){
+        e.stopPropagation();
+        e.preventDefault();
+        this$.handler(e);
+        return false;
+      });
+    }
+    return DragDropTarget;
+  }());
+  this.NGON.DragDropTarget = DragDropTarget;
+  DragDropUploader = (function(superclass){
+    var prototype = extend$((import$(DragDropUploader, superclass).displayName = 'DragDropUploader', DragDropUploader), superclass).prototype, constructor = DragDropUploader;
+    function DragDropUploader(target){
+      var upload, this$ = this;
+      upload = function(f){
+        return new Uploader(f);
+      };
+      DragDropUploader.superclass.call(this, target, function(dropEvent){
+        var i$, ref$, len$, f, results$ = [];
+        for (i$ = 0, len$ = (ref$ = dropEvent.dataTransfer.files).length; i$ < len$; ++i$) {
+          f = ref$[i$];
+          results$.push(upload(f));
+        }
+        return results$;
+      });
+    }
+    return DragDropUploader;
+  }(DragDropTarget));
+  this.NGON.DragDropUploader = DragDropUploader;
   Interaction = (function(){
     Interaction.displayName = 'Interaction';
     var prototype = Interaction.prototype, constructor = Interaction;
@@ -195,7 +280,7 @@
     };
     return Interaction;
   }(EventDispatcher));
-  this.Interaction = Interaction;
+  this.NGON.Interaction = Interaction;
   Socket = (function(){
     Socket.displayName = 'Socket';
     var prototype = Socket.prototype, constructor = Socket;
@@ -203,9 +288,11 @@
     function Socket(opts){
       var loc, defaultOpts, tryConnect, this$ = this;
       opts == null && (opts = {});
+      this.send = bind$(this, 'send', prototype);
+      this.close = bind$(this, 'close', prototype);
       loc = document.location;
       defaultOpts = {
-        url: "ws://" + loc.hostname + ":" + loc.port + "/",
+        url: "ws://" + loc.hostname + ":" + loc.port + "/ws",
         reconnect: true,
         reconnectDelay: 500,
         autoConnect: false
@@ -216,13 +303,18 @@
       tryConnect = function(){
         this$.ws = new WebSocket(this$.opts.url);
         this$.ws.onopen = function(){
+          console.log("connected!");
           this$.connected = true;
           this$.dispatch(this$.firstConnection ? 'connect' : 'reconnect');
           return this$.firstConnection = false;
         };
         this$.ws.onmessage = function(e){
+          var packet;
           console.log("<-", e.data);
-          return this$.dispatch('message', e.data);
+          packet = JSON.parse(e.data);
+          if ((packet != null ? packet.e : void 8) != null) {
+            return this$.dispatch(packet.e, packet);
+          }
         };
         this$.ws.onerror = function(e){
           return this$.dispatch('error', e);
@@ -255,95 +347,149 @@
     };
     prototype.send = function(msg){
       console.log("->", msg);
-      this.ws.send(msg);
+      this.ws.send(JSON.stringify(msg));
       return this;
-    };
-    prototype.sendJSON = function(msg){
-      return this.send(JSON.stringify(msg));
     };
     return Socket;
   }(EventDispatcher));
-  loc = document.location;
-  h = function(){
-    this.sendJSON({
-      e: "u/" + Math.random() * 10
-    });
-    this.sendJSON({
-      e: 'o',
-      a: 'sub'
-    });
-    this.sendJSON({
-      e: 'u',
-      a: 'sub'
-    });
-    return this.sendJSON({
-      e: 'o/foo',
-      a: 'create',
-      p: {
-        x: 0,
-        y: 0
-      }
-    });
-  };
-  N = new Socket({
-    url: "ws:/" + loc.hostname + ":" + loc.port + "/ws"
-  });
-  N.on('connect', h);
-  N.on('reconnect', h);
-  Block = (function(){
-    Block.displayName = 'Block';
-    var prototype = Block.prototype, constructor = Block;
-    function Block(){
-      var this$ = this;
-      this.block = document.createElement('div');
-      this.block.className = "block moveable";
-      document.body.appendChild(this.block);
-      this.int = new Interaction(this.block);
-      this.int.on('down', function(){
-        return N.sendJSON({
-          e: 'o/foo',
-          a: 'lock'
-        });
-      }).on('up', function(){
-        return N.sendJSON({
-          e: 'o/foo',
-          a: 'unlock'
-        });
-      }).on('move', function(d){
-        return N.sendJSON({
-          e: 'o/foo',
-          a: 'inc',
-          p: {
-            x: d.deltaX,
-            y: d.deltaY
+  this.NGON.Socket = Socket;
+  Object = (function(){
+    Object.displayName = 'Object';
+    var prototype = Object.prototype, constructor = Object;
+    importAll$(prototype, arguments[0]);
+    function Object(id, initial){
+      var handleUpdate, this$ = this;
+      this.id = id;
+      this.unlock = bind$(this, 'unlock', prototype);
+      this.lock = bind$(this, 'lock', prototype);
+      this.inc = bind$(this, 'inc', prototype);
+      this.set = bind$(this, 'set', prototype);
+      this.ep = "o/" + this.id;
+      handleUpdate = function(packet){
+        var key, ref$, val, results$ = [];
+        if (packet.a === 'lock') {
+          return this$.dispatch('lock', packet.p);
+        } else if (packet.a === 'unlock') {
+          return this$.dispatch('unlock');
+        } else if (packet.p != null) {
+          for (key in ref$ = packet.p) {
+            val = ref$[key];
+            results$.push(this$.dispatch(key, val));
           }
-        });
+          return results$;
+        }
+      };
+      NGON.send({
+        e: this.ep,
+        a: "create",
+        p: initial
       });
+      NGON.subscribe(this.ep, handleUpdate);
     }
-    return Block;
-  }());
-  block = new Block;
-  N.on('message', function(d){
-    var p, ref$;
-    p = JSON.parse(d);
-    if (((ref$ = p.p) != null ? ref$.x : void 8) != null) {
-      block.block.style.left = p.p.x + "px";
+    prototype.set = function(){
+      var args, o;
+      args = slice$.call(arguments);
+      if (args.length === 1) {
+        NGON.send({
+          e: this.ep,
+          p: args[0]
+        });
+      } else if (args.length === 2) {
+        o = {};
+        o[args[0]] = args[1];
+        NGON.send({
+          e: this.ep,
+          p: o
+        });
+      }
+      return this;
+    };
+    prototype.inc = function(){
+      var args, o;
+      args = slice$.call(arguments);
+      if (args.length === 1) {
+        NGON.send({
+          e: this.ep,
+          p: args[0],
+          a: "inc"
+        });
+      } else if (args.length === 2) {
+        o = {};
+        o[args[0]] = args[1];
+        NGON.send({
+          e: this.ep,
+          p: o,
+          a: "inc"
+        });
+      }
+      return this;
+    };
+    prototype.lock = function(){
+      NGON.send({
+        e: this.ep,
+        a: "lock"
+      });
+      return this;
+    };
+    prototype.unlock = function(){
+      NGON.send({
+        e: this.ep,
+        a: "unlock"
+      });
+      return this;
+    };
+    return Object;
+  }(EventDispatcher));
+  this.NGON.Object = Object;
+  this.NGON.setUsername = function(un){
+    return localStorage.ngon_username = un;
+  };
+  this.NGON.getUsername = function(){
+    var name;
+    name = localStorage.ngon_username;
+    if (name == null) {
+      name = window.prompt("Your name?", "");
     }
-    if (((ref$ = p.p) != null ? ref$.y : void 8) != null) {
-      return block.block.style.top = p.p.y + "px";
+    if (name != null) {
+      return NGON.setUsername(name);
     }
-  });
-  N.connect();
+  };
+  this.NGON.connect = function(opts, f){
+    var uid, s;
+    uid = NGON.getUsername();
+    NGON.socket = s = new Socket(opts);
+    NGON.send = s.send;
+    s.on('connect', function(){
+      s.send({
+        e: "u/" + uid
+      });
+      return f();
+    });
+    return s.connect();
+  };
+  this.NGON.subscribe = function(endpoint, f){
+    NGON.socket.send({
+      e: endpoint,
+      a: 'sub'
+    });
+    return NGON.socket.on(endpoint, f);
+  };
   function bind$(obj, key, target){
     return function(){ return (target || obj)[key].apply(obj, arguments) };
   }
-  function importAll$(obj, src){
-    for (var key in src) obj[key] = src[key];
-    return obj;
+  function extend$(sub, sup){
+    function fun(){} fun.prototype = (sub.superclass = sup).prototype;
+    (sub.prototype = new fun).constructor = sub;
+    if (typeof sup.extended == 'function') sup.extended(sub);
+    return sub;
   }
   function import$(obj, src){
     var own = {}.hasOwnProperty;
     for (var key in src) if (own.call(src, key)) obj[key] = src[key];
+    return obj;
+  }
+  function importAll$(obj, src){
+    for (var key in src) obj[key] = src[key];
     return obj;
   }
 }).call(this);

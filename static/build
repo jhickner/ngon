@@ -1,1 +1,0 @@
-elm --runtime=/js/elm.js ws.elm

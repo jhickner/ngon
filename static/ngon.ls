@@ -1,3 +1,5 @@
+@NGON = {}
+
 EventDispatcher =
   on: (name, fn) ->
     @events = {} unless @events?
@@ -71,12 +73,163 @@ EventDispatcher =
 
 EventDispatcher.addListener = EventDispatcher.on
 
+class Uploader
+  (file) ->
+    fd = new FormData
+    fd.append \file, file
+
+    xhr = new XMLHttpRequest
+    xhr.upload.addEventListener \progress, @uploadProgress, false
+    xhr.addEventListener \load, @uploadComplete, false
+    xhr.addEventListener \lerror, @uploadFailed, false
+    xhr.addEventListener \abort, @uploadCanceled, false
+
+    loc = document.location
+    xhr.open \POST, "http://#{loc.hostname}:#{loc.port}/files", true
+    xhr.send fd
+
+  uploadProgress: (e) ~>
+    if e.lengthComputable
+      pct = Math.round(e.loaded * 100 / e.total)
+
+  uploadComplete: (e) ~> console.log "upload complete!"
+  uploadFailed: (e) ~> console.log "upload failed!: #{e}"
+  uploadCanceled: (e) ~> console.log "upload canceled!"
+
+@NGON.Uploader = Uploader
+
+class DragDropTarget
+  (@target, @handler) ->
+
+    @target.addEventListener \dragenter, (e) ->
+      e.stopPropagation!
+      e.preventDefault!
+      false
+
+    @target.addEventListener \dragover, (e) ->
+      e.stopPropagation!
+      e.preventDefault!
+      false
+
+    @target.addEventListener \drop, (e) ~>
+      e.stopPropagation!
+      e.preventDefault!
+      @handler e
+      false
+
+@NGON.DragDropTarget = DragDropTarget
+
+class DragDropUploader extends DragDropTarget
+  (target) ->
+
+    upload = (f) -> new Uploader f
+
+    super target, (dropEvent) ~>
+      for f in dropEvent.dataTransfer.files
+        upload f
+
+@NGON.DragDropUploader = DragDropUploader
+
+class Interaction implements EventDispatcher
+  (@target) ->
+    @clicks = [] # click count for multi clicks
+
+    @target.addEventListener \mousedown @mouseDown
+    @target.addEventListener \touchstart @touchStart
+
+    document.addEventListener \touchmove @touchMove
+    document.addEventListener \touchend @touchEnd
+
+  # on multiple consecutive clicks dispatch an "Nclick" event
+  # where N is the number of clicks
+  checkMultiClick: ~>
+    ts = new Date().valueOf!
+    if @clicks.length == 0 || ts - @clicks[0] < 250
+      @clicks.unshift ts
+      clearTimeout @clickIV
+      @clickIV = setTimeout (~> 
+        @dispatch "#{@clicks.length}click"
+        @clicks = []), 250
+
+  cleanup: ~>
+    # remove mouse events
+    @removeMouseEvents!
+    @target.removeEventListener \mousedown @mouseDown
+
+    # remove touch events
+    @target.removeEventListener \touchstart @touchStart
+    document.removeEventListener \touchmove @touchMove
+    document.removeEventListener \touchend @touchEnd
+
+  removeMouseEvents: ~>
+    document.removeEventListener \mousemove @mouseMove
+    document.removeEventListener \mouseup @mouseUp
+
+  mouseDown: (e) ~>
+    @checkMultiClick!
+    @startX = @lastX = e.clientX
+    @startY = @lastY = e.clientY
+    document.addEventListener \mousemove @mouseMove
+    document.addEventListener \mouseup @mouseUp
+    @dispatch \down, @
+    e.preventDefault!
+    false
+
+  mouseUp: (e) ~>
+    @removeMouseEvents!
+    @dispatch \up, @
+    e.preventDefault!
+    false
+
+  mouseMove: (e) ~>
+    x = e.clientX
+    y = e.clientY
+    @deltaX = x - @lastX
+    @deltaY = y - @lastY
+    @lastX = x
+    @lastY = y
+    @dispatch \move, @
+    e.preventDefault!
+    false
+
+  touchStart: (e) ~>
+    if e.touches.length == 1
+      @checkMultiClick!
+      touch = e.touches[0]
+      @touchID = touch.identifier
+      @startX = @lastX = touch.pageX
+      @startY = @lastY = touch.pageY
+      @dispatch \down, @
+      e.preventDefault!
+      false
+
+  touchMove: (e) ~>
+    touch = e.touches[0]
+    if @touchID? and touch.identifier == @touchID
+      x = touch.pageX
+      y = touch.pageY
+      @deltaX = x - @lastX
+      @deltaY = y - @lastY
+      @lastX = x
+      @lastY = y
+      @dispatch \move, @
+      e.preventDefault!
+      false
+
+  touchEnd: (e) ~>
+    if e.touches.length == 0 or e.touches[0].identifier == @touchID
+      @touchID = null
+      @dispatch \up, @
+      e.preventDefault!
+      false
+
+@NGON.Interaction = Interaction
 
 class Socket implements EventDispatcher
   (opts = {}) -> 
     loc = document.location
     defaultOpts =
-      { url: "ws://#{loc.hostname}:#{loc.port}/"
+      { url: "ws://#{loc.hostname}:#{loc.port}/ws"
       , reconnect: true
       , reconnectDelay: 500
       , autoConnect: false
@@ -88,12 +241,16 @@ class Socket implements EventDispatcher
     tryConnect = ~>
       @ws = new WebSocket @opts.url
       @ws.onopen = ~> 
+        console.log "connected!"
         @connected = true
         @dispatch if @firstConnection then \connect else \reconnect
         @firstConnection = false
       @ws.onmessage = (e) ~> 
         console.log "<-", e.data
-        @dispatch \message, e.data
+        packet = JSON.parse e.data
+        if packet?.e?
+          @dispatch packet.e, packet
+        #@dispatch \message, e.data
       @ws.onerror = (e) ~> @dispatch \error, e
       @ws.onclose = ~>
         if @connected then @dispatch \disconnect
@@ -108,320 +265,89 @@ class Socket implements EventDispatcher
 
     @connect! if @opts.autoConnect
 
-  close: -> 
+  close: ~> 
     @opts.reconnect = false
     @ws.close!
     @
 
-  send: (msg) -> 
+  send: (msg) ~> 
     console.log "->", msg
-    @ws.send msg
+    @ws.send JSON.stringify msg
     @
 
+@NGON.Socket = Socket
 
-class Packets implements EventDispatcher
-  ->
-    @receiverIDs = 0
-    @receivers = {}
 
-    handlePacket = (data) ~>
-      packet = @decode data
-      if packet?
-        if packet.id?
-          handler = @receivers[packet.id]
-          if handler?
-            handler packet.data
-            delete @receivers[packet.id]
-        else
-          @dispatch packet.endpoint, packet.data
+class Object implements EventDispatcher
+  (@id, initial) ->
+    @ep = "o/#{@id}"
 
-    M.socket.addListener \message, handlePacket
+    handleUpdate = (packet) ~>
+      if packet.a == \lock
+        @dispatch \lock, packet.p
+      else if packet.a == \unlock
+        @dispatch \unlock
+      else if packet.p?
+        for key, val of packet.p
+          @dispatch key, val
 
-  decode: (data) ->
-    parts = data.match /([^:]+)?:([^:]+):?([\s\S]*)?/
-    if not parts? then return null
-    
-    id = parts[1]
-    packet = {endpoint: parts[2]}
-    if id? then packet.id = id
+    NGON.send {e:@ep, a:"create", p:initial} 
+    NGON.subscribe @ep, handleUpdate
 
-    try packet.data = JSON.parse parts[3]
-
-    packet
-
-  encode: (endpoint, payload=null, id=null) ->
-    packet = ""
-    if id? then packet += id
-    packet += ":#{endpoint}"
-
-    if payload?
-      try packet += ":" + JSON.stringify payload
-
-    packet
-
-  send: (endpoint, payload, fn=null) ~>
-    id = null
-    if fn?
-      id = ++@receiverIDs
-      @receivers[id] = fn
-
-    packet = @encode endpoint, payload, id
-    M.socket.send packet
+  set: (...args) ~>
+    if args.length == 1
+      NGON.send {e:@ep, p:args[0]}
+    else if args.length == 2
+      o = {}
+      o[args[0]] = args[1]
+      NGON.send {e:@ep, p:o}
     @
 
-  sendV: (endpoint, payload) ~>
-    @send endpoint, payload, (res) -> console.log res
-
-
-class Clients implements EventDispatcher
-  ->
-    @clients = {0:\HTTP}
-
-    handleConnect = ([id, name]) ~>
-      @clients[id] = name
-      @dispatch \connect, id
-
-    handleDisconnect = (id) ~>
-      if (@clients[id])? 
-        delete @clients[id]
-        @dispatch \disconnect, id
-
-    M.packets.on \cc, handleConnect
-             .on \dc, handleDisconnect
-
-  getName: (id) ~> @clients[id]
-
-
-class Stores implements EventDispatcher
-  ->
-    @stores = {}
-
-    handleUpdate = ([id, o]) ~>
-      if (s = @stores[id])? then s._handleMerge o
-
-    handleIncrement = ([id, o]) ~>
-      if (s = @stores[id])? then s._handleIncrement o
-
-    handleCreate = ([id, o, lock]) ~>
-      if @stores[id]?
-        handleUpdate id, o
-      else
-        s = @add new Store id, o, lock
-        @dispatch "created_#{id}", s
-        # if the object has a "type" property,
-        # dispatch on the value
-        if o.type? then @dispatch o.type, s
-
-    handleLock = ([cid, id]) ~>
-      if (s = @stores[id])? then s._handleLockChange cid
-
-    handleReleaseLock = (id) ~>
-      if (s = @stores[id])? then s._handleLockChange null
-
-    handleDelete = (id) ~>
-      if (s = @stores[id])?
-        s.dispatch \delete
-        delete @stores[id]
-
-    M.packets.on \cs, handleCreate
-             .on \ms, handleUpdate
-             .on \is, handleIncrement
-             .on \gl, handleLock
-             .on \rl, handleReleaseLock
-             .on \ds, handleDelete
-    
-  add: (store) ~>
-    @stores[store.id] = store
-
-  read: (id) ~>
-    M.packets.send \rs, id, (o) ~>
-      @update [id, o]
-
-  get: (id, cb) ~>
-    if cb?
-      if (s = @stores[id])? then
-        cb s
-      else
-        @once "created_#{id}", cb
-
-  create: (obj={}, cb=null) ~>
-    M.packets.send \cs, obj, (id) ~>
-      if cb? then @get id, cb
-
-
-class Store implements EventDispatcher
-  (@id, @data, @lockID=null) ->
-
-  _handleMerge: (o) ~>
-    @data <<< o
-    for key, val of o
-      @dispatch key, val
-    @dispatch \__propchange, @data
-
-  # incorrectly-typed increments are filtered by the server
-  _handleIncrement: (o) ~>
-    for k, v of o
-      if (c = @data[k])?
-        if c instanceof Array
-          c.push v
-        else if c instanceof Object
-          c <<< v
-        else 
-          @data[k] = c += v
-        @dispatch k, c
-    @dispatch \__propchange, @data
-
-  _handleLockChange: (id=null) ~>
-    @lockID = id
-    @dispatch \__lockchange, id
-
-  ###
-
-  get: (prop) ~>
-    @data[prop]
-
-  linkLock: (cb) ~>
-    @on \__lockchange, cb
-    @dispatch \__lockchange, @lockID
-    @
-
-  set: (obj) ~>
-    M.packets.send \ms, [@id, obj]
-    @
-
-  increment: (obj) ~> 
-    # trim increment of 0
-    for k, v of obj
-      if v == 0 then delete obj[k]
-    M.packets.send \is, [@id, obj]
-    @
-
-  link: (f, cb=null) ~>
-    if f instanceof Function
-      @on \__propchange, f
-      @dispatch \__propchange, @data
-    else
-      @on f, cb
-      if (v = @data[f])? then @dispatch f, v 
+  inc: (...args) ~>
+    if args.length == 1
+      NGON.send {e:@ep, p:args[0], a:"inc"}
+    else if args.length == 2
+      o = {}
+      o[args[0]] = args[1]
+      NGON.send {e:@ep, p:o, a:"inc"}
     @
 
   lock: ~> 
-    M.packets.send \gl, @id
+    NGON.send {e:@ep, a:"lock"}
     @
 
   unlock: ~> 
-    M.packets.send \rl, @id
+    NGON.send {e:@ep, a:"unlock"}
     @
+        
+@NGON.Object = Object  
 
-  delete: ~>
-    M.packets.send \ds, @id
-    @
+@NGON.setUsername = (un) ->
+  localStorage.ngon_username = un
 
-
-
-      
-
-class Client
-  ->
-    @id = null
-    @readSettings!
-    M.packets.on \id, (id) ~> @id = id
-  
-  clearName: -> delete localStorage.name
-  setName: (n) -> localStorage.name = n
-  getName: ~>
-    name = localStorage.name
-    unless name? 
-      name = window.prompt "Your name?", ""
-    if name?
-      localStorage.name = name
-      name
-
-  setSetting: (k, v) ->
-    localStorage[k] = v 
-    @readSettings!
-
-  readSettings: ~>
-    # mouse hide
-    m = localStorage.mouseHide
-    document.body.style.cursor = if m == \true then \none else \auto
-
-  sendID: ~>
-    name = @getName!
-    if name?
-      M.packets.send \id, [name, M.instance.name]
+@NGON.getUsername = ->
+  name = localStorage.ngon_username
+  unless name? 
+    name = window.prompt "Your name?", ""
+  if name?
+    NGON.setUsername name
 
 
-###############################################################################
 
-class Instance implements EventDispatcher
-  (@viewport) ->
-    @zIndex = 0
-
-    # set page title
-    path = document.location.pathname.substr 1
-    @name = if path.length > 0 then path else \default
-    document.title = @name
-
-    resizeViewportToFit = ~>
-      xRatio = window.innerWidth / @viewport.offsetWidth
-      yRatio = window.innerHeight / @viewport.offsetHeight
-      @scale = Math.min xRatio, yRatio, 1
-      @viewport.style.webkitTransform = "scale(#{@scale})"
-
-    handleSetSize = ([@width, @height]) ~>
-      @viewport.style.width = "#{@width}px" 
-      @viewport.style.height = "#{@height}px"
-      resizeViewportToFit!
-      @dispatch \resize
-
-    handleResize = (e) ~> resizeViewportToFit!
-
-    @scale = 1
-    @viewport.style.webkitTransformOrigin = "0 0"
-    window.addEventListener \resize, handleResize
-    resizeViewportToFit!
-
-    M.packets.on \isize, handleSetSize
-
-  appendChild: (el) ~> @viewport.appendChild el 
-
-  removeChild: (el) ~> @viewport.removeChild el 
-
-  nextZIndex: ~> @zIndex++
-
-  scaleInput: (x) ~> 
-    Math.round(x / @scale) # round to prevent large decimals on the wire
-
-  setSize: (w, h) -> M.packets.send \isize, [w, h]
-
-  setType: (t) -> M.packets.send \itype, t
-
-  reload: -> window.location.reload!
+handleEndpoint = (p) ->
+  if p.e?
 
 
-###############################################################################
+@NGON.connect = (opts, f) ->
+  uid = NGON.getUsername!
+  NGON.socket = s = new Socket opts
+  NGON.send = s.send
+  s.on \message, -> handleEndpoint
+  s.on \connect, ->
+    s.send {e:"u/#{uid}"}
+    f!
+  s.connect!
 
-@M = M = {}
-M.eventDispatcher = EventDispatcher
-
-M.init = (cb=null) ~>
-  M.socket = new Socket
-  M.packets = new Packets
-  M.instance = new Instance document.getElementById \viewport
-  M.stores = new Stores
-  M.clients = new Clients
-  M.client = new Client
-
-  M.packets.on \ev, (args) ->
-    args = [args] unless args instanceof Array
-    eval.apply window, args
-
-  M.socket.on \connect, ~>
-    M.client.sendID!
-
-  M.socket.on \reconnect, ~>
-    window.location.href = window.location.href
-
-  if cb? then cb!
-  M.socket.connect!
+@NGON.subscribe = (endpoint, f) -> 
+  NGON.socket.send {e:endpoint, a:\sub}
+  NGON.socket.on endpoint, f
