@@ -231,7 +231,7 @@ class Socket implements EventDispatcher
     defaultOpts =
       { url: "ws://#{loc.hostname}:#{loc.port}/ws"
       , reconnect: true
-      , reconnectDelay: 500
+      , reconnectDelay: 1000
       , autoConnect: false
       }
     @opts = defaultOpts <<< opts
@@ -246,7 +246,7 @@ class Socket implements EventDispatcher
         @dispatch if @firstConnection then \connect else \reconnect
         @firstConnection = false
       @ws.onmessage = (e) ~> 
-        console.log "<-", e.data
+        #console.log "<-", e.data
         packet = JSON.parse e.data
         if packet?.e?
           @dispatch packet.e, packet
@@ -271,7 +271,10 @@ class Socket implements EventDispatcher
     @
 
   send: (msg) ~> 
-    console.log "->", msg
+    # reload on error
+    if @ws.readyState != 1
+      document.location.reload!
+    #console.log "->", msg
     @ws.send JSON.stringify msg
     @
 
@@ -322,6 +325,13 @@ class Object implements EventDispatcher
         
 @NGON.Object = Object  
 
+@NGON.watchPage = ->
+  page = new NGON.Object 'page', {url:'index.html'}
+  page.on 'url', (url) ->
+    p = "/#{url}"
+    if document.location.pathname != p
+      document.location.pathname = p
+
 @NGON.setUsername = (un) ->
   localStorage.ngon_username = un
 
@@ -332,17 +342,11 @@ class Object implements EventDispatcher
   if name?
     NGON.setUsername name
 
-
-
-handleEndpoint = (p) ->
-  if p.e?
-
-
-@NGON.connect = (opts, f) ->
+@NGON.connect = (f, opts = {}) ->
   uid = NGON.getUsername!
   NGON.socket = s = new Socket opts
   NGON.send = s.send
-  s.on \message, -> handleEndpoint
+  s.on \reconnect, -> document.location.reload!
   s.on \connect, ->
     s.send {e:"u/#{uid}"}
     f!

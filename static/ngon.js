@@ -294,7 +294,7 @@
       defaultOpts = {
         url: "ws://" + loc.hostname + ":" + loc.port + "/ws",
         reconnect: true,
-        reconnectDelay: 500,
+        reconnectDelay: 1000,
         autoConnect: false
       };
       this.opts = import$(defaultOpts, opts);
@@ -310,7 +310,6 @@
         };
         this$.ws.onmessage = function(e){
           var packet;
-          console.log("<-", e.data);
           packet = JSON.parse(e.data);
           if ((packet != null ? packet.e : void 8) != null) {
             return this$.dispatch(packet.e, packet);
@@ -346,7 +345,9 @@
       return this;
     };
     prototype.send = function(msg){
-      console.log("->", msg);
+      if (this.ws.readyState !== 1) {
+        document.location.reload();
+      }
       this.ws.send(JSON.stringify(msg));
       return this;
     };
@@ -441,6 +442,19 @@
     return Object;
   }(EventDispatcher));
   this.NGON.Object = Object;
+  this.NGON.watchPage = function(){
+    var page;
+    page = new NGON.Object('page', {
+      url: 'index.html'
+    });
+    return page.on('url', function(url){
+      var p;
+      p = "/" + url;
+      if (document.location.pathname !== p) {
+        return document.location.pathname = p;
+      }
+    });
+  };
   this.NGON.setUsername = function(un){
     return localStorage.ngon_username = un;
   };
@@ -454,11 +468,15 @@
       return NGON.setUsername(name);
     }
   };
-  this.NGON.connect = function(opts, f){
+  this.NGON.connect = function(f, opts){
     var uid, s;
+    opts == null && (opts = {});
     uid = NGON.getUsername();
     NGON.socket = s = new Socket(opts);
     NGON.send = s.send;
+    s.on('reconnect', function(){
+      return document.location.reload();
+    });
     s.on('connect', function(){
       s.send({
         e: "u/" + uid

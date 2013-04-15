@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Block</title>
+  <meta name="viewport" 
+    content="width=device-width, initial-scale=1, minimum-scale=1"/>
+  <meta name="apple-mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+  <style type="text/css">
+    body {
+      background-color: #121212;
+      margin:0;
+      padding:0;
+      overflow:hidden;
+    }
+    .moveable { position:absolute; }
+    .block {
+      width:100px;
+      height:100px;
+      background-color:#ccc;
+    }
+  </style>
+</head>
+<body>
+  <div id="block" class="moveable block"></div>
+  <script src="ngon.js" type="text/javascript"></script>
+  <script type="text/javascript">
+    NGON.connect(function() {
+        var block = document.getElementById("block");
+        var o = new NGON.Object('foo', {x:0, y:0});
+        o.on('x', function(x) { block.style.left = x + "px"});
+        o.on('y', function(y) { block.style.top = y + "px"});
+
+        var i = new NGON.Interaction(block)
+        i.on("down", function () {o.lock()});
+        i.on("up", function () {o.unlock()});
+        i.on("move", function (d) {o.inc({x:d.deltaX, y:d.deltaY})});
+
+        NGON.watchPage();
+    });
+  </script>
+</body>
+</html>
