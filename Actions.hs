@@ -56,8 +56,12 @@ addP p v = p { pPayload = Just $ A.toJSON v }
 addE :: Packet -> Text -> Packet
 addE p err = p { pError = Just $ A.String err }
 
-ioE :: Monad m => m a -> IOException -> m a
-ioE f _ = f 
+ioE :: Monad m => (IOException -> m a) -> IOException -> m a
+ioE f = f
+
+ioEUnit :: Monad m => IOException -> m ()
+ioEUnit = ioE . const $ return ()
+
 
 -------------------------------------------------------------------------------
 -- Subscriptions
@@ -90,9 +94,10 @@ sendNotifications subs umap p sts = do
         return $ mapMaybe ((`M.lookup` umap') . sUId) . Ix.toList $ subs' @+ sts
 
 sendPacket :: Client -> Packet -> IO ()
-sendPacket (Client _ (SocketClient s)) p = sendAll s . A.encode $ p
+sendPacket (Client _ (SocketClient s)) p = 
+    handle ioEUnit $ sendAll s . A.encode $ p
 sendPacket (Client _ (WebSocketClient s)) p = 
-    WS.sendSink s . WS.textData $ A.encode p
+    handle ioEUnit $ WS.sendSink s . WS.textData $ A.encode p
 sendPacket _ _ = return ()
 
 
@@ -292,7 +297,7 @@ mkPath :: [EndpointComponent] -> FilePath
 mkPath = joinPath . map T.unpack
 
 listFiles :: FilePath -> IO [String]
-listFiles fp = handle (ioE $ return []) $ listFiles' (fileRoot </> fp)
+listFiles fp = handle (ioE $ const $ return []) $ listFiles' (fileRoot </> fp)
   where 
     listFiles' path' = 
         getDirectoryContents path' >>= filterM (doesFileExist . combine path')
@@ -318,6 +323,7 @@ connectUser client@Client{..} umap =
 
 disconnectUser :: UId -> ServerEnv -> IO ()
 disconnectUser uid ServerEnv{..} = do
+    putStrLn $ "[" ++ T.unpack (getUId uid) ++ "] - disconnected" 
     sendNotifications sSubs sUsers 
         (Packet Nothing ["u", getUId uid] "disconnect" Nothing Nothing)
         [AllUsersSub]

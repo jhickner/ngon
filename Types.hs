@@ -10,12 +10,14 @@ import Control.Concurrent.MVar
 import Network.Socket (Socket)
 import Network.WebSockets (WebSockets, Sink, TextProtocol, Hybi00)
 
+import qualified Data.ByteString.Lazy.Char8 as BL
 import Data.Hashable (Hashable, hashWithSalt, hashUsing)
 import Data.Data
 import Data.IxSet
 import Data.HashMap.Strict (HashMap)
 import Data.Text (Text)
 import qualified Data.Text as T
+import qualified Data.Aeson as A
 import Data.Aeson (Object, Value(..), object, ToJSON(..), FromJSON(..), (.=), (.:?), (.:))
 
 import Data.Monoid
@@ -70,7 +72,10 @@ instance Indexable Lock where
 data Client = Client
   { cUId    :: UId
   , cHandle :: ClientHandle
-  } deriving (Show, Eq)
+  } deriving Eq
+
+instance Show Client where
+  show (Client uid _) = T.unpack $ getUId uid
 
 data ClientHandle 
   = SocketClient Socket 
@@ -89,7 +94,10 @@ data Packet = Packet
     , pAction   :: Text
     , pPayload  :: Maybe Value
     , pError    :: Maybe Value
-    } deriving (Show, Eq)
+    } deriving (Eq)
+
+instance Show Packet where
+  show = BL.unpack . A.encode
 
 hasId :: Packet -> Bool
 hasId = isJust . pId

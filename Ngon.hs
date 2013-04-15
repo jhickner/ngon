@@ -28,7 +28,7 @@ import Control.Monad.IO.Class
 import Control.Monad
 import Control.Applicative
 import Control.Concurrent
-import Control.Exception (finally)
+import Control.Exception (finally, handle)
 
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -67,19 +67,24 @@ main = do
   where sigINThandler = mapM_ killThread
 
 runWebServer :: ServerEnv -> IO ()
-runWebServer env = httpServe config (route routes) where
-    routes = [ ("/ws",    setTimeout 31536000 >> runWebSocketsSnap (wsAPI env))
+runWebServer env = httpServe config (route routes) 
+  where
+    routes = [ ("/ws",    ws)
              , ("/api",   httpAPI env)
              , ("/files", handleUploads env)
              , ("/files", serveDirectory fileRoot)
              , ("/",      serveDirectory "static")
              ]
+    ws = do
+        setTimeout 31536000
+        runWebSocketsSnap $ wsAPI env
 
 config :: Config Snap a
 config = 
     setPort 8000 .
     setVerbose False .
-    setErrorLog  (ConfigIoLog B.putStrLn) .
+    -- setErrorLog  (ConfigIoLog B.putStrLn) .
+    setErrorLog  ConfigNoLog .
     setAccessLog ConfigNoLog $
     defaultConfig 
 
@@ -162,14 +167,17 @@ wsAPI :: ServerEnv -> WS.Request -> WS ()
 wsAPI env rq = do
     WS.acceptRequest rq
     sink <- WS.getSink
-    client <- webSocketDecoder $ runConnectPacket env (WebSocketClient sink)
-    flip WS.catchWsError (handler client) $
-        webSocketDecoder $ \p -> do
-            mrpacket <- runPacket $ mkPacketEnv env client p
-            maybe (return ()) (WS.sendSink sink . WS.textData . encode) mrpacket
-            return Nothing
+    flip WS.catchWsError (const $ return ()) $ do
+      client <- webSocketDecoder $ runConnectPacket env (WebSocketClient sink)
+      flip WS.catchWsError (handler client) $
+          webSocketDecoder $ \p ->
+              handle (ioE $ const $ cleanup client >> return Nothing) $ do
+                  mrpacket <- runPacket $ mkPacketEnv env client p
+                  maybe (return ()) (WS.sendSink sink . WS.textData . encode) mrpacket
+                  return Nothing
   where
-    handler client _e = liftIO $ disconnectUser (cUId client) env
+    handler client _e = liftIO $ cleanup client
+    cleanup client = disconnectUser (cUId client) env
 
 -- | loop parsing JSON as long as action returns Nothing
 webSocketDecoder :: A.FromJSON a => (a -> IO (Maybe b)) -> WS b
@@ -242,6 +250,7 @@ runConnectPacket ServerEnv{..} chandle p@Packet{..} =
             isOK <- connectUser client sUsers
             if isOK
               then do
+                  putStrLn $ "[" ++ show client ++ "] - " ++ show p
                   sendConnect uid 
                   when (hasId p) $ 
                       sendPacket client p
@@ -259,9 +268,13 @@ runConnectPacket ServerEnv{..} chandle p@Packet{..} =
                         (Packet Nothing ["u", uid] "connect" Nothing Nothing)
                         [AllUsersSub]
 
+debug PacketEnv{..} =
+  putStrLn $  "[" ++ show pClient ++"] - " ++ show pPacket
+
 -- | Packet handler for connected clients.
 runPacket :: PacketEnv -> IO (Maybe Packet)
 runPacket env = do
+    debug env
     res <- dispatch env
     notify env res
     return $ if hasId (pPacket env)
@@ -295,8 +308,8 @@ dispatch env@PacketEnv{..} = d pEndpoint pAction
 
     -- User commands
     d ["u"]      "get"        = okResult pPacket <$> getUsers env
-    d ["u"]      _            = msgAllUsers env
-    d ["u", uid] _            = msgUser (UId uid) env
+    d ["u", uid] "set"        = msgUser (UId uid) env
+    d ["u"]      "set"        = msgAllUsers env
 
     -- File commands
     d ("f":p)    "get"        = okResult pPacket <$> listFiles (mkPath p)
