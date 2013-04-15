@@ -63,6 +63,7 @@ main = do
     t1 <- forkIO $ runWebServer env
     t2 <- forkIO $ runSocketServer env
     installHandler sigINT (Catch $ sigINThandler [t, t1, t2]) Nothing
+    putStrLn "NGON starting up..."
     forever $ threadDelay 1000000
   where sigINThandler = mapM_ killThread
 
@@ -93,10 +94,10 @@ config =
 
 httpAPI :: ServerEnv -> Snap ()
 httpAPI env = do
-    packet <- Packet (Just 1) <$> (parseEndpoint <$> getSafePath) 
-                              <*> parseAction
-                              <*> parsePayload
-                              <*> return Nothing
+    packet <- Packet Nothing <$> (parseEndpoint <$> getSafePath) 
+                             <*> parseAction
+                             <*> parsePayload
+                             <*> return Nothing
     rpacket <- (fromJust <$>) . liftIO $ runPacket $ mkPacketEnv env httpClient packet
     writeJSON $ mplus (pError rpacket) (pPayload rpacket)
   where
@@ -277,7 +278,7 @@ runPacket env = do
     debug env
     res <- dispatch env
     notify env res
-    return $ if hasId (pPacket env)
+    return $ if hasId (pPacket env) || isHTTP (pClient env)
                then Just $ getP res
                else Nothing
   where 

@@ -86,7 +86,11 @@ data ClientHandle
 instance ToJSON Client where
   toJSON (Client (UId uid) _) = String uid
   
+httpClient :: Client
 httpClient = Client (UId "http") HTTPClient
+
+isHTTP :: Client -> Bool
+isHTTP client = cHandle client == HTTPClient 
 
 data Packet = Packet
     { pId       :: Maybe Integer
