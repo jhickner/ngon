@@ -1,4 +1,4 @@
-{-# LANGUAGE TemplateHaskell, QuasiQuotes, TypeFamilies, OverloadedStrings, RecordWildCards #-}
+{-# LANGUAGE ScopedTypeVariables, TemplateHaskell, QuasiQuotes, TypeFamilies, OverloadedStrings, RecordWildCards #-}
 
 -- recv error still happens when sending from socket, so it doesn't originate
 -- from http call
@@ -65,7 +65,7 @@ data NGONRoute = NGONRoute ServerEnv
 type Texts = [Text]
 
 mkRoute "NGONRoute" [parseRoutes|
-/api/*Texts ApiR GET POST DELETE
+/api/*Texts ApiR
 |]
 
 webApp :: ServerEnv -> RouteM ()
@@ -93,6 +93,8 @@ runWebServer env = do
     app <- toWaiApp $ webApp env
     W.runSettings W.defaultSettings
       { W.settingsPort = 8000
+      -- , W.settingsOnException = \(e::SomeException) ->
+          -- putStrLn $ "EXCEPTION: " ++ show e
       , W.settingsIntercept = WWS.intercept (wsAPI env)
       } app
 
@@ -123,12 +125,8 @@ runWebServer env = httpServe config (route routes)
 -------------------------------------------------------------------------------
 -- HTTP API
 
-getApiR = apiR
-postApiR = apiR
-deleteApiR = apiR
-
-apiR :: [Text] -> Handler NGONRoute
-apiR endpoint (NGONRoute env) req = do
+handleApiR :: [Text] -> Handler NGONRoute
+handleApiR endpoint (NGONRoute env) req = do
     packet <- liftIO getPacket
     rpacket <- (fromJust <$>) . liftIO $ runPacket $ mkPacketEnv env httpClient packet
     return $ writeJSON $ mplus (pError rpacket) (pPayload rpacket)
@@ -229,17 +227,27 @@ handleUploads env@ServerEnv{..} = method POST $ do
 wsAPI :: ServerEnv -> WS.Request -> WS ()
 wsAPI env rq = do
     WS.acceptRequest rq
-    sink <- WS.getSink
-    client <- webSocketDecoder $ runConnectPacket env (WebSocketClient sink)
-    flip WS.catchWsError (handler client) $
-        webSocketDecoder $ \p -> do
-            mrpacket <- runPacket $ mkPacketEnv env client p
-            maybe (return ()) (WS.sendSink sink . WS.textData . encode) mrpacket
-            return Nothing
+    flip WS.catchWsError (const $ return ()) $ do
+        sink <- WS.getSink
+        client <- webSocketDecoder $ runConnectPacket env (WebSocketClient sink)
+
+        {-
+        void . liftIO $ runPacket (mkPacketEnv env client $ 
+          Packet Nothing ["o", "page"] "create" 
+                 (Just $ A.object ["url" A..= ("index.html" :: Text)]) Nothing)
+
+        void . liftIO $ runPacket (mkPacketEnv env client $ 
+          Packet Nothing ["o", "page"] "sub" Nothing Nothing)
+        -}
+
+        flip WS.catchWsError (handler client) $
+            -- liftIO $ forever $ threadDelay 1000000
+            webSocketDecoder $ \p -> do
+                mrpacket <- runPacket $ mkPacketEnv env client p
+                maybe (return ()) (WS.sendSink sink . WS.textData . encode) mrpacket
+                return Nothing
   where
-    handler client e = case fromException e of
-        Just WS.ConnectionClosed -> liftIO $ disconnectUser (cUId client) env
-        _ -> liftIO $ print e
+    handler client _e = liftIO $ disconnectUser (cUId client) env
 
 -- | loop parsing JSON as long as action returns Nothing
 webSocketDecoder :: A.FromJSON a => (a -> IO (Maybe b)) -> WS b

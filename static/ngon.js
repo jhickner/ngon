@@ -451,6 +451,7 @@
       var p;
       p = "/" + url;
       if (document.location.pathname !== p) {
+        NGON.socket.close();
         return document.location.pathname = p;
       }
     });

@@ -330,6 +330,7 @@ class Object implements EventDispatcher
   page.on 'url', (url) ->
     p = "/#{url}"
     if document.location.pathname != p
+      NGON.socket.close!
       document.location.pathname = p
 
 @NGON.setUsername = (un) ->
