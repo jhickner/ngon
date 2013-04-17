@@ -93,9 +93,6 @@ sendNotifications env@ServerEnv{..} p sts = do
         putMVar sUsers umap'
         return $ mapMaybe ((`M.lookup` umap') . sUId) . Ix.toList $ subs' @+ sts
 
--- sendPacket :: ServerEnv -> Client -> Packet -> IO ()
--- sendPacket _ _ p = print . A.encode $ p
-
 sendPacket :: ServerEnv -> Client -> Packet -> IO ()
 sendPacket env client p = case client of
     (Client uid (SocketClient s)) -> 
@@ -104,7 +101,7 @@ sendPacket env client p = case client of
       wrap uid $ WS.sendSink s . WS.textData . A.encode $ p
     _ -> return ()
   where
-    wrap uid = handle (ioE $ \e -> print e >> disconnectUser uid env)
+    wrap uid = handle (ioE $ const $ disconnectUser uid env)
 
 
 sendHandlePacket :: ClientHandle -> Packet -> IO ()

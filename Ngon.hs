@@ -1,4 +1,4 @@
-{-# LANGUAGE ScopedTypeVariables, BangPatterns, OverloadedStrings, RecordWildCards #-}
+{-# LANGUAGE OverloadedStrings, RecordWildCards #-}
 
 -- recv error still happens when sending from socket, so it doesn't originate
 -- from http call
@@ -24,10 +24,10 @@ import Network.WebSockets.Snap
 import Control.Concurrent.MVar
 import Control.Monad.IO.Class
 import Control.Monad
-import qualified Control.Monad.CatchIO as CIO
+-- import qualified Control.Monad.CatchIO as CIO
 import Control.Applicative
 import Control.Concurrent
-import Control.Exception (SomeException, fromException, finally, handle)
+import Control.Exception (finally)
 
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -83,8 +83,8 @@ config :: Config Snap a
 config = 
     setPort 8000 .
     setVerbose False .
-    setErrorLog  (ConfigIoLog B.putStrLn) .
-    -- setErrorLog  ConfigNoLog .
+    -- setErrorLog  (ConfigIoLog B.putStrLn) .
+    setErrorLog  ConfigNoLog .
     setAccessLog ConfigNoLog $
     defaultConfig 
 
@@ -174,9 +174,7 @@ wsAPI env rq = do
             maybe (return ()) (WS.sendSink sink . WS.textData . encode) mrpacket
             return Nothing
   where
-    handler client e = case fromException e of
-        Just WS.ConnectionClosed -> liftIO $ disconnectUser (cUId client) env
-        _ -> liftIO $ print e
+    handler client _e = liftIO $ disconnectUser (cUId client) env
 
 -- | loop parsing JSON as long as action returns Nothing
 webSocketDecoder :: A.FromJSON a => (a -> IO (Maybe b)) -> WS b
