@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings, RecordWildCards #-}
+{-# LANGUAGE TemplateHaskell, QuasiQuotes, TypeFamilies, OverloadedStrings, RecordWildCards #-}
 
 -- recv error still happens when sending from socket, so it doesn't originate
 -- from http call
@@ -10,9 +10,12 @@ import Network.Wai
 import qualified Network.Wai.Handler.Warp as W
 import qualified Network.Wai.Handler.WebSockets as WWS
 import qualified Network.WebSockets as WS
-import Network.Wai.Middleware.Static
+-- import Network.Wai.Middleware.Static
 import Network.HTTP.Types
 import Network.HTTP.Types.Method
+
+import Network.Wai.Application.Static
+import Network.Wai.Middleware.Routes
 
 import Data.Conduit (ResourceT, runResourceT, ($$))
 import Data.Conduit.List (consume)
@@ -20,7 +23,7 @@ import Data.Conduit.List (consume)
 import System.FilePath
 import System.Directory
 
-import System.Posix.Signals
+import System.Posix.Signals hiding (Handler)
 
 import Network.Socket (Socket)
 import Network.Socket.ByteString (recv, sendAll)
@@ -57,6 +60,20 @@ import Actions
 -------------------------------------------------------------------------------
 -- Main / Server
 
+data NGONRoute = NGONRoute ServerEnv
+
+type Texts = [Text]
+
+mkRoute "NGONRoute" [parseRoutes|
+/api/*Texts ApiR GET POST DELETE
+|]
+
+webApp :: ServerEnv -> RouteM ()
+webApp env = do
+  route $ NGONRoute env
+  defaultAction $ staticApp $ defaultFileServerSettings "static"
+
+
 main :: IO ()
 main = do
     env <- ServerEnv <$> newMVar M.empty
@@ -72,10 +89,20 @@ main = do
   where sigINThandler = mapM_ killThread
 
 runWebServer :: ServerEnv -> IO ()
+runWebServer env = do
+    app <- toWaiApp $ webApp env
+    W.runSettings W.defaultSettings
+      { W.settingsPort = 8000
+      , W.settingsIntercept = WWS.intercept (wsAPI env)
+      } app
+
+{-
+runWebServer :: ServerEnv -> IO ()
 runWebServer env = W.runSettings W.defaultSettings
     { W.settingsPort = 8000
     , W.settingsIntercept = WWS.intercept (wsAPI env)
     } $ staticPolicy (addBase "static") (httpAPI env)
+-}
 
 {-
 runWebServer :: ServerEnv -> IO ()
@@ -96,6 +123,25 @@ runWebServer env = httpServe config (route routes)
 -------------------------------------------------------------------------------
 -- HTTP API
 
+getApiR = apiR
+postApiR = apiR
+deleteApiR = apiR
+
+apiR :: [Text] -> Handler NGONRoute
+apiR endpoint (NGONRoute env) req = do
+    packet <- liftIO getPacket
+    rpacket <- (fromJust <$>) . liftIO $ runPacket $ mkPacketEnv env httpClient packet
+    return $ writeJSON $ mplus (pError rpacket) (pPayload rpacket)
+  where
+    getPacket = do
+        payload <- parsePayload req
+        return $ Packet Nothing endpoint
+                                (parseAction req) 
+                                payload
+                                Nothing
+
+
+{-
 httpAPI :: ServerEnv -> Application
 httpAPI env req = do
     packet <- liftIO getPacket
@@ -109,6 +155,7 @@ httpAPI env req = do
                                 payload
                                 Nothing
     endpoint = drop 1 $ pathInfo req
+-}
 
 
 -- return $ responseLBS ok200 [] $ BL.pack . show . pathInfo $ req
