@@ -32,4 +32,5 @@ executable NGON
                      transformers >=0.3, 
                      bytestring >=0.9, 
                      attoparsec >=0.10, 
-                     hashable >=1.2
+                     hashable >=1.2,
+                     MonadCatchIO-transformers >=0.3

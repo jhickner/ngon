@@ -1,10 +1,8 @@
-{-# LANGUAGE OverloadedStrings, RecordWildCards #-}
+{-# LANGUAGE ScopedTypeVariables, BangPatterns, OverloadedStrings, RecordWildCards #-}
 
--- build elm websocket
-
--- check out bacon.js
--- https://github.com/raimohanska/bacon.js/wiki/Documentation
--- use elm example to make a bacon websocket
+-- recv error still happens when sending from socket, so it doesn't originate
+-- from http call
+-- seems to be caused by websockets disconnecting
 
 module Main where
 
@@ -26,9 +24,10 @@ import Network.WebSockets.Snap
 import Control.Concurrent.MVar
 import Control.Monad.IO.Class
 import Control.Monad
+import qualified Control.Monad.CatchIO as CIO
 import Control.Applicative
 import Control.Concurrent
-import Control.Exception (finally, handle)
+import Control.Exception (SomeException, fromException, finally, handle)
 
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -168,17 +167,16 @@ wsAPI :: ServerEnv -> WS.Request -> WS ()
 wsAPI env rq = do
     WS.acceptRequest rq
     sink <- WS.getSink
-    flip WS.catchWsError (const $ return ()) $ do
-      client <- webSocketDecoder $ runConnectPacket env (WebSocketClient sink)
-      flip WS.catchWsError (handler client) $
-          webSocketDecoder $ \p ->
-              handle (ioE $ const $ cleanup client >> return Nothing) $ do
-                  mrpacket <- runPacket $ mkPacketEnv env client p
-                  maybe (return ()) (WS.sendSink sink . WS.textData . encode) mrpacket
-                  return Nothing
+    client <- webSocketDecoder $ runConnectPacket env (WebSocketClient sink)
+    flip WS.catchWsError (handler client) $
+        webSocketDecoder $ \p -> do
+            mrpacket <- runPacket $ mkPacketEnv env client p
+            maybe (return ()) (WS.sendSink sink . WS.textData . encode) mrpacket
+            return Nothing
   where
-    handler client _e = liftIO $ cleanup client
-    cleanup client = disconnectUser (cUId client) env
+    handler client e = case fromException e of
+        Just WS.ConnectionClosed -> liftIO $ disconnectUser (cUId client) env
+        _ -> liftIO $ print e
 
 -- | loop parsing JSON as long as action returns Nothing
 webSocketDecoder :: A.FromJSON a => (a -> IO (Maybe b)) -> WS b
