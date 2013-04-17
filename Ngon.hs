@@ -1,4 +1,4 @@
-{-# LANGUAGE ScopedTypeVariables, BangPatterns, OverloadedStrings, RecordWildCards #-}
+{-# LANGUAGE OverloadedStrings, RecordWildCards #-}
 
 -- recv error still happens when sending from socket, so it doesn't originate
 -- from http call
@@ -6,10 +6,17 @@
 
 module Main where
 
-import Snap.Core
-import Snap.Http.Server
-import Snap.Util.FileServe
-import Snap.Util.FileUploads
+import Network.Wai
+import qualified Network.Wai.Handler.Warp as W
+import qualified Network.Wai.Handler.WebSockets as WWS
+import qualified Network.WebSockets as WS
+import Network.Wai.Middleware.Static
+import Network.HTTP.Types
+import Network.HTTP.Types.Method
+
+import Data.Conduit (ResourceT, runResourceT, ($$))
+import Data.Conduit.List (consume)
+
 import System.FilePath
 import System.Directory
 
@@ -18,13 +25,9 @@ import System.Posix.Signals
 import Network.Socket (Socket)
 import Network.Socket.ByteString (recv, sendAll)
 
-import qualified Network.WebSockets as WS
-import Network.WebSockets.Snap
-
 import Control.Concurrent.MVar
 import Control.Monad.IO.Class
 import Control.Monad
-import qualified Control.Monad.CatchIO as CIO
 import Control.Applicative
 import Control.Concurrent
 import Control.Exception (SomeException, fromException, finally, handle)
@@ -36,12 +39,14 @@ import qualified Data.IxSet as Ix
 
 import qualified Data.HashMap.Strict as M
 import qualified Data.ByteString.Char8 as B
+import qualified Data.ByteString.Lazy.Char8 as BL
 
 import qualified Data.Attoparsec as PB
 import qualified Data.Aeson as A
 import Data.Aeson (encode)
 
 import Data.Maybe (fromJust)
+import Data.Monoid
 
 import TCP
 import Utils
@@ -67,6 +72,13 @@ main = do
   where sigINThandler = mapM_ killThread
 
 runWebServer :: ServerEnv -> IO ()
+runWebServer env = W.runSettings W.defaultSettings
+    { W.settingsPort = 8000
+    , W.settingsIntercept = WWS.intercept (wsAPI env)
+    } $ staticPolicy (addBase "static") (httpAPI env)
+
+{-
+runWebServer :: ServerEnv -> IO ()
 runWebServer env = httpServe config (route routes) 
   where
     routes = [ ("/ws",    ws)
@@ -79,60 +91,63 @@ runWebServer env = httpServe config (route routes)
         setTimeout 31536000
         runWebSocketsSnap $ wsAPI env
 
-config :: Config Snap a
-config = 
-    setPort 8000 .
-    setVerbose False .
-    setErrorLog  (ConfigIoLog B.putStrLn) .
-    -- setErrorLog  ConfigNoLog .
-    setAccessLog ConfigNoLog $
-    defaultConfig 
+-}
 
 -------------------------------------------------------------------------------
 -- HTTP API
 
-httpAPI :: ServerEnv -> Snap ()
-httpAPI env = do
-    packet <- Packet Nothing <$> (parseEndpoint <$> getSafePath) 
-                             <*> parseAction
-                             <*> parsePayload
-                             <*> return Nothing
+httpAPI :: ServerEnv -> Application
+httpAPI env req = do
+    packet <- liftIO getPacket
     rpacket <- (fromJust <$>) . liftIO $ runPacket $ mkPacketEnv env httpClient packet
-    writeJSON $ mplus (pError rpacket) (pPayload rpacket)
+    return $ writeJSON $ mplus (pError rpacket) (pPayload rpacket)
   where
-    parseEndpoint = map T.pack . splitDirectories
+    getPacket = do
+        payload <- parsePayload req
+        return $ Packet Nothing endpoint 
+                                (parseAction req) 
+                                payload
+                                Nothing
+    endpoint = drop 1 $ pathInfo req
 
-writeJSON :: A.ToJSON a => a -> Snap ()
-writeJSON a = do 
-    modifyResponse $ setHeader "Content-Type" "application/json"
-    writeLBS . A.encode $ a
 
-parsePayload :: Snap (Maybe A.Value)
-parsePayload = do
+-- return $ responseLBS ok200 [] $ BL.pack . show . pathInfo $ req
+
+fromStrict = BL.fromChunks . (:[])
+
+writeJSON :: (A.ToJSON a) => a -> Response
+writeJSON =
+    responseLBS ok200 [("Content-Type", "application/json")] . A.encode
+
+
+-- | stricly read the request body into a bytestring
+rawRequestBody :: Request -> IO B.ByteString
+rawRequestBody req = mconcat <$> runResourceT (requestBody req $$ consume)
+
+parsePayload :: Request -> IO (Maybe A.Value)
+parsePayload req = do
     -- try querystring first
-    mp <- getQueryParam "p"
+    let mp = join . lookup "p" $ queryString req
     case mp of
-      Just x -> return $ decodeStrictValue x
-      Nothing -> decodeStrictValue . toStrict <$> readRequestBody 4096
+      Just x  -> return $ decodeStrictValue x
+      Nothing -> decodeStrictValue <$> rawRequestBody req
 
-parseAction :: Snap Text
-parseAction = do
+parseAction :: Request -> Text
+parseAction req = do
     -- try querystring first
-    ma <- getQueryParam "a"
+    let ma = join . lookup "a" $ queryString req
     case ma of
-      Just x -> return . T.toLower . decodeUtf8 $ x
-      Nothing -> do
+      Just x -> T.toLower . decodeUtf8 $ x
+      Nothing ->
          -- if that fails, use default action from Method
-         method' <- rqMethod <$> getRequest
-         case method' of
-           GET    -> return "get"
-           POST   -> return "set"
-           DELETE -> return "delete"
-           _      -> pass   
+         case T.toLower . decodeUtf8 $ requestMethod req of
+           "post"   -> "set"
+           m        -> m
 
 -------------------------------------------------------------------------------
 -- Upload handler
 
+{-
 handleUploads :: ServerEnv -> Snap ()
 handleUploads env@ServerEnv{..} = method POST $ do
       (tmp, rel, full) <- getPaths
@@ -159,6 +174,7 @@ handleUploads env@ServerEnv{..} = method POST $ do
                 sendNotifications env (packet $ rel </> fn') 
                   [FileSub rel]
               where fn' = B.unpack fn
+-}
 
 -------------------------------------------------------------------------------
 -- WebSocket API
