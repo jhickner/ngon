@@ -13,6 +13,7 @@ import qualified Network.WebSockets as WS
 -- import Network.Wai.Middleware.Static
 import Network.HTTP.Types
 import Network.HTTP.Types.Method
+import Network.Wai.Parse
 
 import Network.Wai.Application.Static
 import Network.Wai.Middleware.Routes
@@ -65,8 +66,66 @@ data NGONRoute = NGONRoute ServerEnv
 type Texts = [Text]
 
 mkRoute "NGONRoute" [parseRoutes|
-/api/*Texts ApiR
+/api/*Texts   ApiR
+/files        FilesR:
+  /             FileR    GET
+  /*Texts       UploadR  POST
 |]
+
+
+getFileR :: Handler NGONRoute
+getFileR _ = staticApp $ defaultFileServerSettings "files"
+
+postUploadR :: [Text] -> Handler NGONRoute
+postUploadR es (NGONRoute env) req = do
+    fs <- getFiles req
+    unless (null fs) $ liftIO $ do
+        (rel, full) <- getPaths
+        mkDirP full
+        forM_ fs $ save full rel
+    return $ responseLBS ok200 [] BL.empty
+  where
+    getFiles req = do
+        (_, fs) <- parseRequestBody lbsBackEnd req 
+        return [ (B.unpack (fileName f), fileContent f) | (_, f) <- fs ]
+    getPaths = do
+        pwd <- liftIO getCurrentDirectory
+        let rel  = joinPath . map T.unpack $ es
+            full = pwd </> fileRoot </> rel
+        return (rel, full)
+    save full rel (fn, bs) = do
+        BL.writeFile (full </> fn) bs
+        sendNotifications env (packet $ rel </> fn) [FileSub rel]
+    mkDirP    = liftIO . createDirectoryIfMissing True
+    packet fp = Packet Nothing (fpToEndpoint fp) "create" Nothing Nothing
+
+{-
+      (tmp, rel, full) <- getPaths
+      mkDirP full
+      handleFileUploads tmp policy 
+          (const $ allowWithMaximumSize maxSize) $ 
+              mapM_ (handler rel full)
+  where
+    getPaths = do
+        tmp <- liftIO getTemporaryDirectory
+        pwd <- liftIO getCurrentDirectory
+        rel <- getSafePath
+        return (tmp, rel, pwd </> fileRoot </> rel)
+    mkDirP    = liftIO . createDirectoryIfMissing True
+    maxSize   = 1024 * 1000 * 100
+    packet fp = Packet Nothing (fpToEndpoint fp) "create" Nothing Nothing
+    policy    = setMaximumFormInputSize maxSize defaultUploadPolicy
+    handler rel full (info, res) = case res of
+        Left _    -> return ()
+        Right tfp -> case partFileName info of  
+            Nothing -> return ()
+            Just fn -> liftIO $ do
+                renameFile tfp (full </> fn')
+                sendNotifications env (packet $ rel </> fn') 
+                  [FileSub rel]
+              where fn' = B.unpack fn
+-}
+
 
 webApp :: ServerEnv -> RouteM ()
 webApp env = do
