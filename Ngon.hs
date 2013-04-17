@@ -62,7 +62,6 @@ import Actions
 -- Main / Server
 
 data NGONRoute = NGONRoute ServerEnv
-
 type Texts = [Text]
 
 mkRoute "NGONRoute" [parseRoutes|
@@ -72,66 +71,10 @@ mkRoute "NGONRoute" [parseRoutes|
   /*Texts       UploadR  POST
 |]
 
-
-getFileR :: Handler NGONRoute
-getFileR _ = staticApp $ defaultFileServerSettings "files"
-
-postUploadR :: [Text] -> Handler NGONRoute
-postUploadR es (NGONRoute env) req = do
-    fs <- getFiles req
-    unless (null fs) $ liftIO $ do
-        (rel, full) <- getPaths
-        mkDirP full
-        forM_ fs $ save full rel
-    return $ responseLBS ok200 [] BL.empty
-  where
-    getFiles req = do
-        (_, fs) <- parseRequestBody lbsBackEnd req 
-        return [ (B.unpack (fileName f), fileContent f) | (_, f) <- fs ]
-    getPaths = do
-        pwd <- liftIO getCurrentDirectory
-        let rel  = joinPath . map T.unpack $ es
-            full = pwd </> fileRoot </> rel
-        return (rel, full)
-    save full rel (fn, bs) = do
-        BL.writeFile (full </> fn) bs
-        sendNotifications env (packet $ rel </> fn) [FileSub rel]
-    mkDirP    = liftIO . createDirectoryIfMissing True
-    packet fp = Packet Nothing (fpToEndpoint fp) "create" Nothing Nothing
-
-{-
-      (tmp, rel, full) <- getPaths
-      mkDirP full
-      handleFileUploads tmp policy 
-          (const $ allowWithMaximumSize maxSize) $ 
-              mapM_ (handler rel full)
-  where
-    getPaths = do
-        tmp <- liftIO getTemporaryDirectory
-        pwd <- liftIO getCurrentDirectory
-        rel <- getSafePath
-        return (tmp, rel, pwd </> fileRoot </> rel)
-    mkDirP    = liftIO . createDirectoryIfMissing True
-    maxSize   = 1024 * 1000 * 100
-    packet fp = Packet Nothing (fpToEndpoint fp) "create" Nothing Nothing
-    policy    = setMaximumFormInputSize maxSize defaultUploadPolicy
-    handler rel full (info, res) = case res of
-        Left _    -> return ()
-        Right tfp -> case partFileName info of  
-            Nothing -> return ()
-            Just fn -> liftIO $ do
-                renameFile tfp (full </> fn')
-                sendNotifications env (packet $ rel </> fn') 
-                  [FileSub rel]
-              where fn' = B.unpack fn
--}
-
-
 webApp :: ServerEnv -> RouteM ()
 webApp env = do
   route $ NGONRoute env
   defaultAction $ staticApp $ defaultFileServerSettings "static"
-
 
 main :: IO ()
 main = do
@@ -152,34 +95,8 @@ runWebServer env = do
     app <- toWaiApp $ webApp env
     W.runSettings W.defaultSettings
       { W.settingsPort = 8000
-      -- , W.settingsOnException = \(e::SomeException) ->
-          -- putStrLn $ "EXCEPTION: " ++ show e
       , W.settingsIntercept = WWS.intercept (wsAPI env)
       } app
-
-{-
-runWebServer :: ServerEnv -> IO ()
-runWebServer env = W.runSettings W.defaultSettings
-    { W.settingsPort = 8000
-    , W.settingsIntercept = WWS.intercept (wsAPI env)
-    } $ staticPolicy (addBase "static") (httpAPI env)
--}
-
-{-
-runWebServer :: ServerEnv -> IO ()
-runWebServer env = httpServe config (route routes) 
-  where
-    routes = [ ("/ws",    ws)
-             , ("/api",   httpAPI env)
-             , ("/files", handleUploads env)
-             , ("/files", serveDirectory fileRoot)
-             , ("/",      serveDirectory "static")
-             ]
-    ws = do
-        setTimeout 31536000
-        runWebSocketsSnap $ wsAPI env
-
--}
 
 -------------------------------------------------------------------------------
 -- HTTP API
@@ -197,34 +114,10 @@ handleApiR endpoint (NGONRoute env) req = do
                                 payload
                                 Nothing
 
-
-{-
-httpAPI :: ServerEnv -> Application
-httpAPI env req = do
-    packet <- liftIO getPacket
-    rpacket <- (fromJust <$>) . liftIO $ runPacket $ mkPacketEnv env httpClient packet
-    return $ writeJSON $ mplus (pError rpacket) (pPayload rpacket)
-  where
-    getPacket = do
-        payload <- parsePayload req
-        return $ Packet Nothing endpoint 
-                                (parseAction req) 
-                                payload
-                                Nothing
-    endpoint = drop 1 $ pathInfo req
--}
-
-
--- return $ responseLBS ok200 [] $ BL.pack . show . pathInfo $ req
-
-fromStrict = BL.fromChunks . (:[])
-
 writeJSON :: (A.ToJSON a) => a -> Response
 writeJSON =
     responseLBS ok200 [("Content-Type", "application/json")] . A.encode
 
-
--- | stricly read the request body into a bytestring
 rawRequestBody :: Request -> IO B.ByteString
 rawRequestBody req = mconcat <$> runResourceT (requestBody req $$ consume)
 
@@ -249,36 +142,33 @@ parseAction req = do
            m        -> m
 
 -------------------------------------------------------------------------------
--- Upload handler
+-- Files
 
-{-
-handleUploads :: ServerEnv -> Snap ()
-handleUploads env@ServerEnv{..} = method POST $ do
-      (tmp, rel, full) <- getPaths
-      mkDirP full
-      handleFileUploads tmp policy 
-          (const $ allowWithMaximumSize maxSize) $ 
-              mapM_ (handler rel full)
+getFileR :: Handler NGONRoute
+getFileR _ = staticApp $ defaultFileServerSettings "files"
+
+postUploadR :: [Text] -> Handler NGONRoute
+postUploadR es (NGONRoute env) req = do
+    fs <- getFiles req
+    unless (null fs) $ liftIO $ do
+        (rel, full) <- getPaths
+        mkDirP full
+        forM_ fs $ save full rel
+    return $ responseLBS ok200 [] BL.empty
   where
+    getFiles req = do
+        (_, fs) <- parseRequestBody lbsBackEnd req 
+        return [ (B.unpack (fileName f), fileContent f) | (_, f) <- fs ]
     getPaths = do
-        tmp <- liftIO getTemporaryDirectory
         pwd <- liftIO getCurrentDirectory
-        rel <- getSafePath
-        return (tmp, rel, pwd </> fileRoot </> rel)
-    mkDirP    = liftIO . createDirectoryIfMissing True
-    maxSize   = 1024 * 1000 * 100
+        let rel  = joinPath . map T.unpack $ es
+            full = pwd </> fileRoot </> rel
+        return (rel, full)
+    save full rel (fn, bs) = do
+        BL.writeFile (full </> fn) bs
+        sendNotifications env (packet $ rel </> fn) [FileSub rel]
+    mkDirP    = createDirectoryIfMissing True
     packet fp = Packet Nothing (fpToEndpoint fp) "create" Nothing Nothing
-    policy    = setMaximumFormInputSize maxSize defaultUploadPolicy
-    handler rel full (info, res) = case res of
-        Left _    -> return ()
-        Right tfp -> case partFileName info of  
-            Nothing -> return ()
-            Just fn -> liftIO $ do
-                renameFile tfp (full </> fn')
-                sendNotifications env (packet $ rel </> fn') 
-                  [FileSub rel]
-              where fn' = B.unpack fn
--}
 
 -------------------------------------------------------------------------------
 -- WebSocket API
@@ -289,18 +179,7 @@ wsAPI env rq = do
     flip WS.catchWsError (const $ return ()) $ do
         sink <- WS.getSink
         client <- webSocketDecoder $ runConnectPacket env (WebSocketClient sink)
-
-        {-
-        void . liftIO $ runPacket (mkPacketEnv env client $ 
-          Packet Nothing ["o", "page"] "create" 
-                 (Just $ A.object ["url" A..= ("index.html" :: Text)]) Nothing)
-
-        void . liftIO $ runPacket (mkPacketEnv env client $ 
-          Packet Nothing ["o", "page"] "sub" Nothing Nothing)
-        -}
-
         flip WS.catchWsError (handler client) $
-            -- liftIO $ forever $ threadDelay 1000000
             webSocketDecoder $ \p -> do
                 mrpacket <- runPacket $ mkPacketEnv env client p
                 maybe (return ()) (WS.sendSink sink . WS.textData . encode) mrpacket
