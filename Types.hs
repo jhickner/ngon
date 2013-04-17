@@ -57,6 +57,9 @@ data PacketEnv = PacketEnv
 mkPacketEnv :: ServerEnv -> Client -> Packet -> PacketEnv
 mkPacketEnv ServerEnv{..} = PacketEnv sUsers sObjects sLocks sSubs
 
+mkServerEnv :: PacketEnv -> ServerEnv
+mkServerEnv PacketEnv{..} = ServerEnv pUsers pObjects pLocks pSubs
+
 type WS = WebSockets Hybi00
 
 instance TextProtocol p => Show (Sink p) where

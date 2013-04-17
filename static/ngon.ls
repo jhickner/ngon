@@ -341,9 +341,11 @@ class Object implements EventDispatcher
     name = window.prompt "Your name?", ""
   if name?
     NGON.setUsername name
+  name
 
 @NGON.connect = (f, opts = {}) ->
-  uid = NGON.getUsername!
+  #uid = NGON.getUsername!
+  uid = Math.round Math.random! * 1000
   NGON.socket = s = new Socket opts
   NGON.send = s.send
   s.on \reconnect, -> document.location.reload!

@@ -84,8 +84,8 @@ config :: Config Snap a
 config = 
     setPort 8000 .
     setVerbose False .
-    -- setErrorLog  (ConfigIoLog B.putStrLn) .
-    setErrorLog  ConfigNoLog .
+    setErrorLog  (ConfigIoLog B.putStrLn) .
+    -- setErrorLog  ConfigNoLog .
     setAccessLog ConfigNoLog $
     defaultConfig 
 
@@ -135,7 +135,7 @@ parseAction = do
 -- Upload handler
 
 handleUploads :: ServerEnv -> Snap ()
-handleUploads ServerEnv{..} = method POST $ do
+handleUploads env@ServerEnv{..} = method POST $ do
       (tmp, rel, full) <- getPaths
       mkDirP full
       handleFileUploads tmp policy 
@@ -157,7 +157,7 @@ handleUploads ServerEnv{..} = method POST $ do
             Nothing -> return ()
             Just fn -> liftIO $ do
                 renameFile tfp (full </> fn')
-                sendNotifications sSubs sUsers (packet $ rel </> fn') 
+                sendNotifications env (packet $ rel </> fn') 
                   [FileSub rel]
               where fn' = B.unpack fn
 
@@ -244,7 +244,7 @@ socketDecoder sock bs action = loop Nothing bs
 -- "u/username" and attempts to connect them. Loops until a successful
 -- connection and then returns a 'Client' object.
 runConnectPacket :: ServerEnv -> ClientHandle -> Packet -> IO (Maybe Client)
-runConnectPacket ServerEnv{..} chandle p@Packet{..} =
+runConnectPacket env@ServerEnv{..} chandle p@Packet{..} =
     case pEndpoint of
         ["u", uid] -> do
             let client = Client (UId uid) chandle
@@ -254,18 +254,17 @@ runConnectPacket ServerEnv{..} chandle p@Packet{..} =
                   putStrLn $ "[" ++ show client ++ "] - " ++ show p
                   sendConnect uid 
                   when (hasId p) $ 
-                      sendPacket client p
+                      sendPacket env client p
                   return $ Just client
               else do
                   when (hasId p) $ 
-                      sendPacket client $ addE p "User id already in use"
+                      sendPacket env client $ addE p "User id already in use"
                   return Nothing
         _ -> do
-            let client = Client (UId "unknown") chandle
-            sendPacket client $ addE p "Connect first"
+            sendHandlePacket chandle $ addE p "Connect first"
             return Nothing
   where
-    sendConnect uid = sendNotifications sSubs sUsers
+    sendConnect uid = sendNotifications env
                         (Packet Nothing ["u", uid] "connect" Nothing Nothing)
                         [AllUsersSub]
 

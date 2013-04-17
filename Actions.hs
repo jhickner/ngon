@@ -67,7 +67,7 @@ ioEUnit = ioE . const $ return ()
 -- Subscriptions
 
 notify :: PacketEnv -> Result -> IO ()
-notify PacketEnv{..} res =
+notify env@PacketEnv{..} res =
     case res of
       Error{} -> return ()
       (OK n p) -> case n of
@@ -79,27 +79,36 @@ notify PacketEnv{..} res =
         FileDeleted fp     -> send' p [FileSub fp]
         _ -> return ()
   where
-    send' p = sendNotifications pSubs pUsers (p { pId = Nothing })
+    send' p = sendNotifications (mkServerEnv env) (p { pId = Nothing })
 
-sendNotifications :: MVar SubSet -> MVar UserMap -> Packet -> [SubType] -> IO ()
-sendNotifications subs umap p sts = do
+sendNotifications :: ServerEnv -> Packet -> [SubType] -> IO ()
+sendNotifications env@ServerEnv{..} p sts = do
     clients <- getSubs
-    mapM_ (`sendPacket` p) clients
+    mapM_ (\c -> sendPacket env c p) clients
   where
     getSubs = do
-        subs' <- takeMVar subs
-        umap' <- takeMVar umap
-        putMVar subs subs'
-        putMVar umap umap'
+        subs' <- takeMVar sSubs
+        umap' <- takeMVar sUsers
+        putMVar sSubs subs'
+        putMVar sUsers umap'
         return $ mapMaybe ((`M.lookup` umap') . sUId) . Ix.toList $ subs' @+ sts
 
-sendPacket :: Client -> Packet -> IO ()
-sendPacket (Client _ (SocketClient s)) p = 
-    handle ioEUnit $ sendAll s . A.encode $ p
-sendPacket (Client _ (WebSocketClient s)) p = 
-    handle ioEUnit $ WS.sendSink s . WS.textData $ A.encode p
-sendPacket _ _ = return ()
+sendPacket :: ServerEnv -> Client -> Packet -> IO ()
+sendPacket env client p = case client of
+    (Client uid (SocketClient s)) -> 
+      wrap uid $ sendAll s . A.encode $ p
+    (Client uid (WebSocketClient s)) -> 
+      wrap uid $ WS.sendSink s . WS.textData . A.encode $ p
+    _ -> return ()
+  where
+    wrap uid = handle (ioE $ const $ disconnectUser uid env)
 
+
+sendHandlePacket :: ClientHandle -> Packet -> IO ()
+sendHandlePacket ch p = case ch of
+    (SocketClient s) -> handle ioEUnit $ sendAll s . A.encode $ p
+    (WebSocketClient s) -> handle ioEUnit $ WS.sendSink s . WS.textData . A.encode $ p
+    _ -> return ()
 
 -------------------------------------------------------------------------------
 -- Subscriptions
@@ -129,7 +138,7 @@ sendInitialUpdate env@PacketEnv{..} st =
     case st of
       AllUsersSub -> do
         uids <- getUsers env
-        forM_ uids $ \u -> sendPacket pClient $ 
+        forM_ uids $ \u -> sendPacket senv pClient $ 
             Packet Nothing ["u", getUId u] "connect" Nothing Nothing
       AllObjectsSub -> do
         objs <- getObjects env
@@ -139,11 +148,12 @@ sendInitialUpdate env@PacketEnv{..} st =
         maybe (return ()) sendObj obj
       FileSub fp -> do
         files <- listFiles fp
-        forM_ files $ \f -> sendPacket pClient $
+        forM_ files $ \f -> sendPacket senv pClient $
             Packet Nothing (fpToEndpoint $ fp </> f) "create" Nothing Nothing
   where
+    senv = mkServerEnv env
     sendObj o = case M.lookup "id" o of
-        Just (A.String oid) -> sendPacket pClient $
+        Just (A.String oid) -> sendPacket senv pClient $
             Packet Nothing ["o",oid] "create" (Just $ A.Object o) Nothing
         _   -> return ()
 
@@ -322,9 +332,9 @@ connectUser client@Client{..} umap =
         Just _  -> (m, False) 
 
 disconnectUser :: UId -> ServerEnv -> IO ()
-disconnectUser uid ServerEnv{..} = do
+disconnectUser uid env@ServerEnv{..} = do
     putStrLn $ "[" ++ T.unpack (getUId uid) ++ "] - disconnected" 
-    sendNotifications sSubs sUsers 
+    sendNotifications env
         (Packet Nothing ["u", getUId uid] "disconnect" Nothing Nothing)
         [AllUsersSub]
     modifyMVar_ sUsers $ return . M.delete uid
@@ -340,21 +350,22 @@ getClients :: PacketEnv -> IO [Client]
 getClients env = M.elems <$> readMVar (pUsers env)
 
 msgUser :: UId -> PacketEnv -> IO Result
-msgUser uid PacketEnv{..} = do
+msgUser uid env@PacketEnv{..} = do
     mclient <- M.lookup uid <$> readMVar pUsers
     case mclient of
       Nothing                    -> return $ errorResult pPacket "No such user id"
       Just (Client _ HTTPClient) -> return $ errorResult pPacket "Can't message HTTP clients"
       Just client                -> do
-          sendPacket client p
+          sendPacket (mkServerEnv env) client p
           return $ ok pPacket
   where
     p = pPacket { pId = Nothing, pEndpoint = ["u", getUId (cUId pClient)] }
 
 msgAllUsers :: PacketEnv -> IO Result
 msgAllUsers env@PacketEnv{..} = do
-    getClients env >>= mapM_ (`sendPacket` p) 
+    getClients env >>= mapM_ (\c -> sendPacket senv c p) 
     return $ ok pPacket
   where
+    senv = mkServerEnv env
     p = pPacket { pId = Nothing, pEndpoint = ["u", getUId (cUId pClient)] }
 

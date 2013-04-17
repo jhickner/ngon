@@ -465,13 +465,14 @@
       name = window.prompt("Your name?", "");
     }
     if (name != null) {
-      return NGON.setUsername(name);
+      NGON.setUsername(name);
     }
+    return name;
   };
   this.NGON.connect = function(f, opts){
     var uid, s;
     opts == null && (opts = {});
-    uid = NGON.getUsername();
+    uid = Math.round(Math.random() * 1000);
     NGON.socket = s = new Socket(opts);
     NGON.send = s.send;
     s.on('reconnect', function(){
