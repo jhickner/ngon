@@ -30,10 +30,9 @@
     var s = document.location.search;
     if (s.length > 0) { 
       var id = s.substr(1);
-      console.log(id);
       var iframe = document.createElement('iframe');
       iframe.src = "http://www.youtube.com/embed/" + id + "?controls=0&autoplay=1"
-        document.body.appendChild(iframe);
+      document.body.appendChild(iframe);
     }
 
     NGON.connect();

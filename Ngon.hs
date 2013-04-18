@@ -105,7 +105,14 @@ parsePayload req = do
     let mp = join . lookup "p" $ queryString req
     case mp of
       Just x  -> return $ decodeStrictValue x
-      Nothing -> decodeStrictValue <$> rawRequestBody req
+      Nothing -> do
+        body <- rawRequestBody req
+        return $ if B.null body
+                 then Nothing
+                 else case decodeStrictValue body of
+                        -- try again with quoted input
+                        Nothing -> decodeStrictValue $ "\"" <> body <> "\""
+                        x       -> x
 
 parseAction :: Request -> Text
 parseAction req = do
