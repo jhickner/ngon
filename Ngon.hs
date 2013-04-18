@@ -1,24 +1,16 @@
-{-# LANGUAGE ScopedTypeVariables, TemplateHaskell, QuasiQuotes, TypeFamilies, OverloadedStrings, RecordWildCards #-}
-
--- recv error still happens when sending from socket, so it doesn't originate
--- from http call
--- seems to be caused by websockets disconnecting
+{-# LANGUAGE OverloadedStrings, RecordWildCards #-}
 
 module Main where
 
 import Network.Wai
 import qualified Network.Wai.Handler.Warp as W
 import qualified Network.Wai.Handler.WebSockets as WWS
+import Network.Wai.Application.Static
 import qualified Network.WebSockets as WS
--- import Network.Wai.Middleware.Static
 import Network.HTTP.Types
-import Network.HTTP.Types.Method
 import Network.Wai.Parse
 
-import Network.Wai.Application.Static
-import Network.Wai.Middleware.Routes
-
-import Data.Conduit (ResourceT, runResourceT, ($$))
+import Data.Conduit (runResourceT, ($$))
 import Data.Conduit.List (consume)
 
 import System.FilePath
@@ -34,7 +26,7 @@ import Control.Monad.IO.Class
 import Control.Monad
 import Control.Applicative
 import Control.Concurrent
-import Control.Exception (SomeException, fromException, finally, handle)
+import Control.Exception (finally)
 
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -61,21 +53,6 @@ import Actions
 -------------------------------------------------------------------------------
 -- Main / Server
 
-data NGONRoute = NGONRoute ServerEnv
-type Texts = [Text]
-
-mkRoute "NGONRoute" [parseRoutes|
-/api/*Texts   ApiR
-/files        FilesR:
-  /             FileR    GET
-  /*Texts       UploadR  POST
-|]
-
-webApp :: ServerEnv -> RouteM ()
-webApp env = do
-  route $ NGONRoute env
-  defaultAction $ staticApp $ defaultFileServerSettings "static"
-
 main :: IO ()
 main = do
     env <- ServerEnv <$> newMVar M.empty
@@ -91,28 +68,17 @@ main = do
   where sigINThandler = mapM_ killThread
 
 runWebServer :: ServerEnv -> IO ()
-runWebServer env = do
-    app <- toWaiApp $ webApp env
+runWebServer env =
     W.runSettings W.defaultSettings
       { W.settingsPort = 8000
       , W.settingsIntercept = WWS.intercept (wsAPI env)
-      } app
+      } $ webApp env
 
--------------------------------------------------------------------------------
--- HTTP API
-
-handleApiR :: [Text] -> Handler NGONRoute
-handleApiR endpoint (NGONRoute env) req = do
-    packet <- liftIO getPacket
-    rpacket <- (fromJust <$>) . liftIO $ runPacket $ mkPacketEnv env httpClient packet
-    return $ writeJSON $ mplus (pError rpacket) (pPayload rpacket)
-  where
-    getPacket = do
-        payload <- parsePayload req
-        return $ Packet Nothing endpoint
-                                (parseAction req) 
-                                payload
-                                Nothing
+webApp :: ServerEnv -> Application
+webApp env req = case pathInfo req of
+    ("api"  :eps) -> httpAPI eps env req
+    ("files":eps) -> handleFiles eps env req 
+    _             -> staticApp (defaultFileServerSettings "static") req
 
 writeJSON :: (A.ToJSON a) => a -> Response
 writeJSON =
@@ -121,9 +87,21 @@ writeJSON =
 rawRequestBody :: Request -> IO B.ByteString
 rawRequestBody req = mconcat <$> runResourceT (requestBody req $$ consume)
 
+-------------------------------------------------------------------------------
+-- HTTP API
+
+httpAPI :: [Text] -> ServerEnv -> Application
+httpAPI endpoint env req = do
+    packet <- liftIO getPacket
+    rpacket <- (fromJust <$>) . liftIO $ runPacket $ mkPacketEnv env httpClient packet
+    return $ writeJSON $ mplus (pError rpacket) (pPayload rpacket)
+  where
+    getPacket = do
+        payload <- parsePayload req
+        return $ Packet Nothing endpoint (parseAction req) payload Nothing
+
 parsePayload :: Request -> IO (Maybe A.Value)
 parsePayload req = do
-    -- try querystring first
     let mp = join . lookup "p" $ queryString req
     case mp of
       Just x  -> return $ decodeStrictValue x
@@ -131,39 +109,40 @@ parsePayload req = do
 
 parseAction :: Request -> Text
 parseAction req = do
-    -- try querystring first
     let ma = join . lookup "a" $ queryString req
     case ma of
-      Just x -> T.toLower . decodeUtf8 $ x
+      Just x  -> toAction x
       Nothing ->
-         -- if that fails, use default action from Method
-         case T.toLower . decodeUtf8 $ requestMethod req of
+         case toAction $ requestMethod req of
            "post"   -> "set"
            m        -> m
+  where toAction = T.toLower . decodeUtf8
 
 -------------------------------------------------------------------------------
 -- Files
 
-getFileR :: Handler NGONRoute
-getFileR _ = staticApp $ defaultFileServerSettings "files"
-
-postUploadR :: [Text] -> Handler NGONRoute
-postUploadR es (NGONRoute env) req = do
-    fs <- getFiles req
-    unless (null fs) $ liftIO $ do
-        (rel, full) <- getPaths
-        mkDirP full
-        forM_ fs $ save full rel
-    return $ responseLBS ok200 [] BL.empty
+handleFiles :: [Text] -> ServerEnv -> Application
+handleFiles endpoint env req = case requestMethod req of
+    "GET"  -> staticApp (defaultFileServerSettings ".") req
+    "POST" -> handleUpload
+    _      -> return $ responseLBS status404 [] BL.empty
   where
-    getFiles req = do
+    handleUpload = do
+        fs <- getFiles
+        unless (null fs) $ liftIO $ do
+            (rel, full) <- getPaths
+            mkDirP full
+            forM_ fs $ save full rel
+        return $ responseLBS ok200 [] BL.empty
+    getFiles = do
         (_, fs) <- parseRequestBody lbsBackEnd req 
         return [ (B.unpack (fileName f), fileContent f) | (_, f) <- fs ]
     getPaths = do
         pwd <- liftIO getCurrentDirectory
-        let rel  = joinPath . map T.unpack $ es
+        let rel  = joinPath . map T.unpack $ safeEndpoint
             full = pwd </> fileRoot </> rel
         return (rel, full)
+    safeEndpoint = if ".." `elem` endpoint then [] else endpoint
     save full rel (fn, bs) = do
         BL.writeFile (full </> fn) bs
         sendNotifications env (packet $ rel </> fn) [FileSub rel]
