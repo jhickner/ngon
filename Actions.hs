@@ -7,28 +7,26 @@ import System.Directory
 import Control.Exception
 import Control.Concurrent
 
-import Control.Applicative
-import Control.Monad
-
 import qualified Network.WebSockets as WS
 import Network.Socket.ByteString.Lazy (sendAll)
 
-import Data.Text (Text)
-import qualified Data.Text as T
-import qualified Data.Aeson as A
-import Data.Aeson ((.=))
-import qualified Data.HashMap.Strict as M
-import qualified Data.Vector as V
-
-import qualified Data.IxSet as Ix
-import Data.IxSet ((@+), (@=))
-
+import Control.Applicative
+import Control.Monad
 import Data.List (foldl')
 import Data.Monoid ((<>))
 import Data.Maybe (mapMaybe)
 
-import Types
+import Data.Text (Text)
+import qualified Data.Text as T
+import qualified Data.HashMap.Strict as M
+import qualified Data.Vector as V
+import qualified Data.IxSet as Ix
+import Data.IxSet ((@+), (@=))
 
+import qualified Data.Aeson as A
+import Data.Aeson ((.=))
+
+import Types
 
 -------------------------------------------------------------------------------
 -- Result combinators
@@ -62,12 +60,11 @@ ioE f = f
 ioEUnit :: Monad m => IOException -> m ()
 ioEUnit = ioE . const $ return ()
 
-
 -------------------------------------------------------------------------------
 -- Subscriptions
 
 notify :: PacketEnv -> Result -> IO ()
-notify env@PacketEnv{..} res =
+notify PacketEnv{..} res =
     case res of
       Error{} -> return ()
       (OK n p) -> case n of
@@ -79,7 +76,7 @@ notify env@PacketEnv{..} res =
         FileDeleted fp     -> send' p [FileSub fp]
         _ -> return ()
   where
-    send' p = sendNotifications (mkServerEnv env) (p { pId = Nothing })
+    send' p = sendNotifications pServerEnv (p { pId = Nothing })
 
 sendNotifications :: ServerEnv -> Packet -> [SubType] -> IO ()
 sendNotifications env@ServerEnv{..} p sts = do
@@ -120,15 +117,15 @@ addSub env@PacketEnv{..} st =
         HTTPClient -> return $ errorResult pPacket "HTTP clients can't subscribe"
         _          -> do
             sendInitialUpdate env st
-            modifyMVar_ pSubs $ \s -> return $
+            modifyMVar_ (pSubs env) $ \s -> return $
                 Ix.insert entry (Ix.delete entry s) -- prevent dups
             return $ ok pPacket
   where
     entry = SubEntry (cUId pClient) st
 
 unSub :: PacketEnv -> SubType -> IO Result
-unSub PacketEnv{..} st = do
-    modifyMVar_ pSubs $ \s -> return $
+unSub env@PacketEnv{..} st = do
+    modifyMVar_ (pSubs env) $ \s -> return $
         Ix.delete (SubEntry (cUId pClient) st) s
     return $ ok pPacket
 
@@ -136,23 +133,22 @@ sendInitialUpdate :: PacketEnv -> SubType -> IO ()
 sendInitialUpdate env@PacketEnv{..} st =
     case st of
       AllUsersSub -> do
-        uids <- getUsers env
-        forM_ uids $ \u -> sendPacket senv pClient $ 
-            Packet Nothing ["u", getUId u] "connect" Nothing Nothing
+          uids <- getUsers env
+          forM_ uids $ \u -> sendPacket pServerEnv pClient $ 
+              Packet Nothing ["u", getUId u] "connect" Nothing Nothing
       AllObjectsSub -> do
-        objs <- getObjects env
-        mapM_ sendObj objs
+          objs <- getObjects env
+          mapM_ sendObj objs
       ObjectSub oid -> do
-        obj <- getObject oid env
-        maybe (return ()) sendObj obj
+          obj <- getObject oid env
+          maybe (return ()) sendObj obj
       FileSub fp -> do
-        files <- listFiles fp
-        forM_ files $ \f -> sendPacket senv pClient $
-            Packet Nothing (fpToEndpoint $ fp </> f) "create" Nothing Nothing
+          files <- listFiles fp
+          forM_ files $ \f -> sendPacket pServerEnv pClient $
+              Packet Nothing (fpToEndpoint $ fp </> f) "create" Nothing Nothing
   where
-    senv = mkServerEnv env
     sendObj o = case M.lookup "id" o of
-        Just (A.String oid) -> sendPacket senv pClient $
+        Just (A.String oid) -> sendPacket pServerEnv pClient $
             Packet Nothing ["o",oid] "create" (Just $ A.Object o) Nothing
         _   -> return ()
 
@@ -165,18 +161,18 @@ withLockedObject :: UId -> OId
                  -> IO Result
 withLockedObject uid oid env@PacketEnv{..} f = 
     withObject oid env $ \o m -> do
-        l <- takeMVar pLocks
+        l <- takeMVar (pLocks env)
         res <- case Ix.getOne (l @= oid) of
             Just (Lock uid' _) | uid' == uid -> f o m
             Nothing -> f o m
             Just _  -> return (m, errorResult pPacket "Object is locked")
-        void $ putMVar pLocks l
+        void $ putMVar (pLocks env) l
         return res
 
 lockObject :: UId -> OId -> PacketEnv -> IO Result
 lockObject uid oid env@PacketEnv{..} = 
     withObject oid env $ \_ m ->
-        modifyMVar pLocks $ \l ->
+        modifyMVar (pLocks env) $ \l ->
           return $ case Ix.getOne (l @= oid) of
             Just (Lock uid' _) | uid' == uid -> 
               (l, (m, okResult pPacket uid))
@@ -187,7 +183,7 @@ lockObject uid oid env@PacketEnv{..} =
 unlockObject :: UId -> OId -> PacketEnv -> IO Result
 unlockObject uid oid env@PacketEnv{..} = 
     withObject oid env $ \_ m ->
-        modifyMVar pLocks $ \l ->
+        modifyMVar (pLocks env) $ \l ->
           return $ case Ix.getOne (l @= oid) of
             Just (Lock uid' _) | uid' == uid -> 
               (Ix.delete (Lock uid oid) l, 
@@ -209,8 +205,8 @@ withObject oid env f =
         Just o  -> f o m
 
 createObject :: OId -> Maybe A.Value -> PacketEnv -> IO Result
-createObject oid (Just (A.Object o)) PacketEnv{..} =
-    modifyMVar pObjects $ \m ->
+createObject oid (Just (A.Object o)) env@PacketEnv{..} =
+    modifyMVar (pObjects env) $ \m ->
         return $ case M.lookup oid m of
           Nothing -> (M.insert oid o' m, OK (ObjectCreated oid) (addP pPacket o'))
           Just _  -> (m, errorResult pPacket "That object id already exists")
@@ -350,21 +346,20 @@ getClients env = M.elems <$> readMVar (pUsers env)
 
 msgUser :: UId -> PacketEnv -> IO Result
 msgUser uid env@PacketEnv{..} = do
-    mclient <- M.lookup uid <$> readMVar pUsers
+    mclient <- M.lookup uid <$> readMVar (pUsers env)
     case mclient of
       Nothing                    -> return $ errorResult pPacket "No such user id"
       Just (Client _ HTTPClient) -> return $ errorResult pPacket "Can't message HTTP clients"
       Just client                -> do
-          sendPacket (mkServerEnv env) client p
+          sendPacket pServerEnv client p
           return $ okResult pPacket ("ok"::Text)
   where
     p = pPacket { pId = Nothing, pEndpoint = ["m", getUId (cUId pClient)] }
 
 msgAllUsers :: PacketEnv -> IO Result
 msgAllUsers env@PacketEnv{..} = do
-    getClients env >>= mapM_ (\c -> sendPacket senv c p) 
+    getClients env >>= mapM_ (\c -> sendPacket pServerEnv c p) 
     return $ okResult pPacket ("ok"::Text)
   where
-    senv = mkServerEnv env
     p = pPacket { pId = Nothing, pEndpoint = ["m", getUId (cUId pClient)] }
 

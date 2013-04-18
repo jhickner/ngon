@@ -3,36 +3,38 @@
 module Main where
 
 import Network.Wai
+import Network.Wai.Parse
+import Network.Wai.Application.Static
 import qualified Network.Wai.Handler.Warp as W
 import qualified Network.Wai.Handler.WebSockets as WWS
-import Network.Wai.Application.Static
 import qualified Network.WebSockets as WS
 import Network.HTTP.Types
-import Network.Wai.Parse
+
+import Network.Socket (Socket)
+import Network.Socket.ByteString (recv, sendAll)
 
 import Data.Conduit (runResourceT, ($$))
 import Data.Conduit.List (consume)
 
 import System.FilePath
 import System.Directory
-
 import System.Posix.Signals hiding (Handler)
 
-import Network.Socket (Socket)
-import Network.Socket.ByteString (recv, sendAll)
-
 import Control.Concurrent.MVar
-import Control.Monad.IO.Class
-import Control.Monad
-import Control.Applicative
 import Control.Concurrent
 import Control.Exception (finally)
 
-import Data.Text (Text)
-import qualified Data.Text as T
-import Data.Text.Encoding (decodeUtf8)
-import qualified Data.IxSet as Ix
+import Control.Monad
+import Control.Monad.IO.Class
+import Control.Applicative
+import Data.Maybe (fromJust)
+import Data.Monoid
 
+import Data.Text (Text)
+import Data.Text.Encoding (decodeUtf8)
+import qualified Data.Text as T
+
+import qualified Data.IxSet as Ix
 import qualified Data.HashMap.Strict as M
 import qualified Data.ByteString.Char8 as B
 import qualified Data.ByteString.Lazy.Char8 as BL
@@ -41,14 +43,10 @@ import qualified Data.Attoparsec as PB
 import qualified Data.Aeson as A
 import Data.Aeson (encode)
 
-import Data.Maybe (fromJust)
-import Data.Monoid
-
-import TCP
-import Utils
 import Types
 import Actions
-
+import TCP
+import Utils
 
 -------------------------------------------------------------------------------
 -- Main / Server
@@ -62,10 +60,9 @@ main = do
     t  <- myThreadId
     t1 <- forkIO $ runWebServer env
     t2 <- forkIO $ runSocketServer env
-    installHandler sigINT (Catch $ sigINThandler [t, t1, t2]) Nothing
+    installHandler sigINT (Catch $ mapM_ killThread [t, t1, t2]) Nothing
     putStrLn "NGON starting up..."
     forever $ threadDelay 1000000
-  where sigINThandler = mapM_ killThread
 
 runWebServer :: ServerEnv -> IO ()
 runWebServer env =
@@ -93,13 +90,15 @@ rawRequestBody req = mconcat <$> runResourceT (requestBody req $$ consume)
 httpAPI :: [Text] -> ServerEnv -> Application
 httpAPI endpoint env req = do
     packet <- liftIO getPacket
-    rpacket <- (fromJust <$>) . liftIO $ runPacket $ mkPacketEnv env httpClient packet
+    rpacket <- (fromJust <$>) . liftIO $ runPacket $ PacketEnv env httpClient packet
     return $ writeJSON $ mplus (pError rpacket) (pPayload rpacket)
   where
     getPacket = do
         payload <- parsePayload req
         return $ Packet Nothing endpoint (parseAction req) payload Nothing
 
+-- | try to parse a payload, first checking the querystring, then the request
+-- body, then the request body with quotes
 parsePayload :: Request -> IO (Maybe A.Value)
 parsePayload req = do
     let mp = join . lookup "p" $ queryString req
@@ -110,7 +109,6 @@ parsePayload req = do
         return $ if B.null body
                  then Nothing
                  else case decodeStrictValue body of
-                        -- try again with quoted input
                         Nothing -> decodeStrictValue $ "\"" <> body <> "\""
                         x       -> x
 
@@ -129,31 +127,27 @@ parseAction req = do
 -- Files
 
 handleFiles :: [Text] -> ServerEnv -> Application
-handleFiles endpoint env req = case requestMethod req of
+handleFiles eps env req = case requestMethod req of
     "GET"  -> staticApp (defaultFileServerSettings ".") req
-    "POST" -> handleUpload
+    "POST" -> handleUploads
     _      -> return $ responseLBS status404 [] BL.empty
   where
-    handleUpload = do
+    handleUploads = do
         fs <- getFiles
         unless (null fs) $ liftIO $ do
-            (rel, full) <- getPaths
+            pwd <- getCurrentDirectory
+            let full = pwd </> fileRoot </> rel
             mkDirP full
-            forM_ fs $ save full rel
+            forM_ fs $ saveFile full
         return $ responseLBS ok200 [] BL.empty
     getFiles = do
-        (_, fs) <- parseRequestBody lbsBackEnd req 
-        return [ (B.unpack (fileName f), fileContent f) | (_, f) <- fs ]
-    getPaths = do
-        pwd <- liftIO getCurrentDirectory
-        let rel  = joinPath . map T.unpack $ safeEndpoint
-            full = pwd </> fileRoot </> rel
-        return (rel, full)
-    safeEndpoint = if ".." `elem` endpoint then [] else endpoint
-    save full rel (fn, bs) = do
+        fs <- map snd . snd <$> parseRequestBody lbsBackEnd req 
+        return [ (B.unpack (fileName f), fileContent f) | f <- fs ]
+    saveFile full (fn, bs) = do
         BL.writeFile (full </> fn) bs
         sendNotifications env (packet $ rel </> fn) [FileSub rel]
     mkDirP    = createDirectoryIfMissing True
+    rel       = mkPath $ if ".." `elem` eps then [] else eps
     packet fp = Packet Nothing (fpToEndpoint fp) "create" Nothing Nothing
 
 -------------------------------------------------------------------------------
@@ -167,7 +161,7 @@ wsAPI env rq = do
         client <- webSocketDecoder $ runConnectPacket env (WebSocketClient sink)
         flip WS.catchWsError (handler client) $
             webSocketDecoder $ \p -> do
-                mrpacket <- runPacket $ mkPacketEnv env client p
+                mrpacket <- runPacket $ PacketEnv env client p
                 maybe (return ()) (WS.sendSink sink . WS.textData . encode) mrpacket
                 return Nothing
   where
@@ -177,15 +171,8 @@ wsAPI env rq = do
 webSocketDecoder :: A.FromJSON a => (a -> IO (Maybe b)) -> WS b
 webSocketDecoder action = loop
   where 
-    loop = do
-        n <- WS.receiveData
-        case decodeStrict n of
-          Nothing -> loop
-          Just p  -> do
-              res <- liftIO $ action p
-              case res of
-                Nothing -> loop
-                Just b  -> return b
+    loop = WS.receiveData >>= maybe loop runAction . decodeStrict 
+    runAction = liftIO . action >=> maybe loop return
 
 -------------------------------------------------------------------------------
 -- Socket API
@@ -198,7 +185,7 @@ runSocketServer env@ServerEnv{..} =
           Nothing     -> return () -- disconnected
           Just client -> flip finally (cleanup client) $ 
               void $ socketDecoder sock (Just bs) $ \p -> do
-                  mrpacket <- runPacket $ mkPacketEnv env client p
+                  mrpacket <- runPacket $ PacketEnv env client p
                   maybe (return ()) (sendAll sock . toStrict . encode) mrpacket
                   return Nothing
   where
@@ -228,7 +215,6 @@ socketDecoder sock bs action = loop Nothing bs
                   Nothing -> loop Nothing $ if B.null bytes' 
                                               then Nothing 
                                               else Just bytes'
-                  
 
 -------------------------------------------------------------------------------
 -- Packet Processing
@@ -246,8 +232,7 @@ runConnectPacket env@ServerEnv{..} chandle p@Packet{..} =
               then do
                   putStrLn $ "[" ++ show client ++ "] - " ++ show p
                   sendConnect uid 
-                  when (hasId p) $ 
-                      sendPacket env client p
+                  when (hasId p) $ sendPacket env client p
                   return $ Just client
               else do
                   when (hasId p) $ 
@@ -261,8 +246,7 @@ runConnectPacket env@ServerEnv{..} chandle p@Packet{..} =
                         (Packet Nothing ["u", uid] "connect" Nothing Nothing)
                         [AllUsersSub]
 
-debug PacketEnv{..} =
-  putStrLn $  "[" ++ show pClient ++"] - " ++ show pPacket
+debug PacketEnv{..} = putStrLn $  "[" ++ show pClient ++"] - " ++ show pPacket
 
 -- | Packet handler for connected clients.
 runPacket :: PacketEnv -> IO (Maybe Packet)

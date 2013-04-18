@@ -46,19 +46,15 @@ data ServerEnv = ServerEnv
 
 -- ServerEnv plus current Client and Packet
 data PacketEnv = PacketEnv 
-  { pUsers   :: MVar UserMap
-  , pObjects :: MVar ObjectMap
-  , pLocks   :: MVar LockSet
-  , pSubs    :: MVar SubSet
+  { pServerEnv :: ServerEnv
   , pClient  :: Client
   , pPacket  :: Packet
   }
 
-mkPacketEnv :: ServerEnv -> Client -> Packet -> PacketEnv
-mkPacketEnv ServerEnv{..} = PacketEnv sUsers sObjects sLocks sSubs
-
-mkServerEnv :: PacketEnv -> ServerEnv
-mkServerEnv PacketEnv{..} = ServerEnv pUsers pObjects pLocks pSubs
+pUsers   = sUsers . pServerEnv
+pObjects = sObjects . pServerEnv
+pLocks   = sLocks . pServerEnv
+pSubs    = sSubs . pServerEnv
 
 type WS = WebSockets Hybi00
 
