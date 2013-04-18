@@ -6,7 +6,7 @@ import Network.Socket.ByteString hiding (send)
 import TCP
 import Types
 
-import qualified Data.Attoparsec as PB
+import Data.Attoparsec
 import qualified Data.Aeson as A
 
 import qualified Data.ByteString.Lazy as BL
@@ -28,10 +28,10 @@ socketDecoder sock f = loop Nothing Nothing
     loop mpartial mbytes = do
         bytes <- maybe (recv sock 4096) return mbytes
         unless (B.null bytes) $ -- null recv indicates closed connection
-          case maybe (PB.parse A.json') PB.feed mpartial bytes of
-            PB.Fail _ _ _reason -> loop Nothing Nothing
-            k@PB.Partial{}      -> loop (Just k) Nothing
-            PB.Done bytes' c    -> do
+          case maybe (parse A.json') feed mpartial bytes of
+            Fail{}        -> loop Nothing Nothing
+            k@Partial{}   -> loop (Just k) Nothing
+            Done bytes' c -> do
                 case A.fromJSON c of
                   A.Success a -> f a
                   _           -> return ()

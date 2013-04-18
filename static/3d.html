@@ -78,8 +78,6 @@
       i.on("down", function () {cube.lock()});
       i.on("up", function () {cube.unlock()});
       i.on("move", function (d) {cube.inc({rx:d.deltaY/100, rz:d.deltaX/100})});
-
-      NGON.watchPage();
     });
   </script>
 </body>

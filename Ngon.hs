@@ -292,11 +292,6 @@ dispatch env@PacketEnv{..} = d pEndpoint pAction
     d ["o", oid] "lock"       = lockObject cUId (OId oid) env
     d ["o", oid] "unlock"     = unlockObject cUId (OId oid) env
 
-    -- User commands
-    d ["u"]      "get"        = okResult pPacket <$> getUsers env
-    d ["u", uid] "set"        = msgUser (UId uid) env
-    d ["u"]      "set"        = msgAllUsers env
-
     -- File commands
     d ("f":p)    "get"        = okResult pPacket <$> listFiles (mkPath p)
     d ("f":p)    "delete"     = deleteFile pPacket (mkPath p)
@@ -311,6 +306,13 @@ dispatch env@PacketEnv{..} = d pEndpoint pAction
     d ["o", oid] "unsub"      = unSub env (ObjectSub (OId oid))
     d ["u"]      "unsub"      = unSub env AllUsersSub
     d ("f":p)    "unsub"      = unSub env (FileSub $ mkPath p)
+
+    -- User commands
+    d ["u"]      "get"        = okResult pPacket <$> getUsers env
+
+    -- Message commands
+    d ["m", uid] _            = msgUser (UId uid) env
+    d ["m"]      _            = msgAllUsers env
 
     d _ _                     = return $ errorResult pPacket "No such endpoint"
 

@@ -1,4 +1,4 @@
-@NGON = {}
+@NGON = NGON = {}
 
 EventDispatcher =
   on: (name, fn) ->
@@ -249,8 +249,10 @@ class Socket implements EventDispatcher
         #console.log "<-", e.data
         packet = JSON.parse e.data
         if packet?.e?
-          @dispatch packet.e, packet
-        #@dispatch \message, e.data
+          ep = packet.e
+          packet.e = ep.split '/'
+          @dispatch ep, packet
+          @dispatch \packet, packet
       @ws.onerror = (e) ~> @dispatch \error, e
       @ws.onclose = ~>
         if @connected then @dispatch \disconnect
@@ -280,8 +282,19 @@ class Socket implements EventDispatcher
 
 @NGON.Socket = Socket
 
+class Users implements EventDispatcher
+  subscribe: ~>
+    NGON.socket.send {e:\u, a:\sub}
+    NGON.socket.on \packet, (p) ~>
+      if p.e[0] == \u
+        @dispatch p.a, p
 
-class Object implements EventDispatcher
+  unsubscribe: ->
+    NGON.socket.send {e:\u, a:\unsub}
+
+@NGON.Users = new Users
+
+class Obj implements EventDispatcher
   (@id, initial) ->
     @ep = "o/#{@id}"
 
@@ -295,7 +308,8 @@ class Object implements EventDispatcher
           @dispatch key, val
 
     NGON.send {e:@ep, a:"create", p:initial} 
-    NGON.subscribe @ep, handleUpdate
+    NGON.send {e:@ep, a:\sub}
+    NGON.socket.on @ep, handleUpdate
 
   set: (...args) ~>
     if args.length == 1
@@ -323,38 +337,62 @@ class Object implements EventDispatcher
     NGON.send {e:@ep, a:"unlock"}
     @
         
-@NGON.Object = Object  
+@NGON.Object = Obj  
 
-@NGON.watchPage = ->
-  page = new NGON.Object 'page', {url:'index.html'}
-  page.on 'url', (url) ->
-    p = "/#{url}"
-    if document.location.pathname != p
-      NGON.socket.close!
-      document.location.pathname = p
+class Objects implements EventDispatcher
+  subscribe: ~>
+    NGON.socket.send {e:\o, a:\sub}
+    NGON.socket.on \packet, (p) ~>
+      if p.e[0] == \o
+        @dispatch p.a, p
 
-@NGON.setUsername = (un) ->
-  localStorage.ngon_username = un
+  unsubscribe: ->
+    NGON.socket.send {e:\o, a:\unsub}
 
-@NGON.getUsername = ->
-  name = localStorage.ngon_username
+  create: (id, initial) -> new Obj id, initial
+
+@NGON.Objects = new Objects
+
+class Messages implements EventDispatcher
+  subscribe: ~>
+    NGON.socket.on \packet, (p) ~>
+      if p.e[0] == \m
+        @dispatch p.a, p
+
+@NGON.Messages = new Messages!
+
+@NGON.Messages.on \url, (p) ->
+  if p.p?
+    NGON.socket.close!
+    document.location.href = p.p
+
+@NGON.Messages.on \eval, (p) ->
+  if p.p?
+    NGON.send {e:"m/#{p.e[1]}", a:\evalresult, p:eval(p.p)}
+
+@NGON.Messages.on \id, (p) -> 
+  if p.p? then NGON.setID p.p
+
+@NGON.setID = (un) ->
+  localStorage.ngon_id = un
+  NGON.socket.close!
+  document.location.reload!
+
+@NGON.readStoredID = ->
+  name = localStorage.ngon_id
   unless name? 
-    name = window.prompt "Your name?", ""
-  if name?
-    NGON.setUsername name
+    name = Math.round Math.random! * 1000
   name
 
 @NGON.connect = (f, opts = {}) ->
-  #uid = NGON.getUsername!
-  uid = Math.round Math.random! * 1000
+  NGON.id = NGON.readStoredID!
   NGON.socket = s = new Socket opts
   NGON.send = s.send
-  s.on \reconnect, -> document.location.reload!
+  s.on \reconnect, -> 
+    s.close!
+    document.location.reload!
   s.on \connect, ->
-    s.send {e:"u/#{uid}"}
-    f!
+    s.send {e:"u/#{NGON.id}"}
+    NGON.Messages.subscribe!
+    if f? then f!
   s.connect!
-
-@NGON.subscribe = (endpoint, f) -> 
-  NGON.socket.send {e:endpoint, a:\sub}
-  NGON.socket.on endpoint, f

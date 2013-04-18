@@ -1,6 +1,6 @@
 (function(){
-  var EventDispatcher, Uploader, DragDropTarget, DragDropUploader, Interaction, Socket, Object, slice$ = [].slice;
-  this.NGON = {};
+  var NGON, EventDispatcher, Uploader, DragDropTarget, DragDropUploader, Interaction, Socket, Users, Obj, Objects, Messages, slice$ = [].slice;
+  this.NGON = NGON = {};
   EventDispatcher = {
     on: function(name, fn){
       if (this.events == null) {
@@ -309,10 +309,13 @@
           return this$.firstConnection = false;
         };
         this$.ws.onmessage = function(e){
-          var packet;
+          var packet, ep;
           packet = JSON.parse(e.data);
           if ((packet != null ? packet.e : void 8) != null) {
-            return this$.dispatch(packet.e, packet);
+            ep = packet.e;
+            packet.e = ep.split('/');
+            this$.dispatch(ep, packet);
+            return this$.dispatch('packet', packet);
           }
         };
         this$.ws.onerror = function(e){
@@ -354,11 +357,39 @@
     return Socket;
   }(EventDispatcher));
   this.NGON.Socket = Socket;
-  Object = (function(){
-    Object.displayName = 'Object';
-    var prototype = Object.prototype, constructor = Object;
+  Users = (function(){
+    Users.displayName = 'Users';
+    var prototype = Users.prototype, constructor = Users;
     importAll$(prototype, arguments[0]);
-    function Object(id, initial){
+    prototype.subscribe = function(){
+      var this$ = this;
+      NGON.socket.send({
+        e: 'u',
+        a: 'sub'
+      });
+      return NGON.socket.on('packet', function(p){
+        if (p.e[0] === 'u') {
+          return this$.dispatch(p.a, p);
+        }
+      });
+    };
+    prototype.unsubscribe = function(){
+      return NGON.socket.send({
+        e: 'u',
+        a: 'unsub'
+      });
+    };
+    function Users(){
+      this.subscribe = bind$(this, 'subscribe', prototype);
+    }
+    return Users;
+  }(EventDispatcher));
+  this.NGON.Users = new Users;
+  Obj = (function(){
+    Obj.displayName = 'Obj';
+    var prototype = Obj.prototype, constructor = Obj;
+    importAll$(prototype, arguments[0]);
+    function Obj(id, initial){
       var handleUpdate, this$ = this;
       this.id = id;
       this.unlock = bind$(this, 'unlock', prototype);
@@ -385,7 +416,11 @@
         a: "create",
         p: initial
       });
-      NGON.subscribe(this.ep, handleUpdate);
+      NGON.send({
+        e: this.ep,
+        a: 'sub'
+      });
+      NGON.socket.on(this.ep, handleUpdate);
     }
     prototype.set = function(){
       var args, o;
@@ -439,60 +474,111 @@
       });
       return this;
     };
-    return Object;
+    return Obj;
   }(EventDispatcher));
-  this.NGON.Object = Object;
-  this.NGON.watchPage = function(){
-    var page;
-    page = new NGON.Object('page', {
-      url: 'index.html'
-    });
-    return page.on('url', function(url){
-      var p;
-      p = "/" + url;
-      if (document.location.pathname !== p) {
-        NGON.socket.close();
-        return document.location.pathname = p;
-      }
-    });
-  };
-  this.NGON.setUsername = function(un){
-    return localStorage.ngon_username = un;
-  };
-  this.NGON.getUsername = function(){
-    var name;
-    name = localStorage.ngon_username;
-    if (name == null) {
-      name = window.prompt("Your name?", "");
+  this.NGON.Object = Obj;
+  Objects = (function(){
+    Objects.displayName = 'Objects';
+    var prototype = Objects.prototype, constructor = Objects;
+    importAll$(prototype, arguments[0]);
+    prototype.subscribe = function(){
+      var this$ = this;
+      NGON.socket.send({
+        e: 'o',
+        a: 'sub'
+      });
+      return NGON.socket.on('packet', function(p){
+        if (p.e[0] === 'o') {
+          return this$.dispatch(p.a, p);
+        }
+      });
+    };
+    prototype.unsubscribe = function(){
+      return NGON.socket.send({
+        e: 'o',
+        a: 'unsub'
+      });
+    };
+    prototype.create = function(id, initial){
+      return new Obj(id, initial);
+    };
+    function Objects(){
+      this.subscribe = bind$(this, 'subscribe', prototype);
     }
-    if (name != null) {
-      NGON.setUsername(name);
+    return Objects;
+  }(EventDispatcher));
+  this.NGON.Objects = new Objects;
+  Messages = (function(){
+    Messages.displayName = 'Messages';
+    var prototype = Messages.prototype, constructor = Messages;
+    importAll$(prototype, arguments[0]);
+    prototype.subscribe = function(){
+      var this$ = this;
+      return NGON.socket.on('packet', function(p){
+        if (p.e[0] === 'm') {
+          return this$.dispatch(p.a, p);
+        }
+      });
+    };
+    function Messages(){
+      this.subscribe = bind$(this, 'subscribe', prototype);
+    }
+    return Messages;
+  }(EventDispatcher));
+  this.NGON.Messages = new Messages();
+  this.NGON.Messages.on('url', function(p){
+    if (p.p != null) {
+      NGON.socket.close();
+      return document.location.href = p.p;
+    }
+  });
+  this.NGON.Messages.on('eval', function(p){
+    if (p.p != null) {
+      return NGON.send({
+        e: "m/" + p.e[1],
+        a: 'evalresult',
+        p: eval(p.p)
+      });
+    }
+  });
+  this.NGON.Messages.on('id', function(p){
+    if (p.p != null) {
+      return NGON.setID(p.p);
+    }
+  });
+  this.NGON.setID = function(un){
+    localStorage.ngon_id = un;
+    NGON.socket.close();
+    return document.location.reload();
+  };
+  this.NGON.readStoredID = function(){
+    var name;
+    name = localStorage.ngon_id;
+    if (name == null) {
+      name = Math.round(Math.random() * 1000);
     }
     return name;
   };
   this.NGON.connect = function(f, opts){
-    var uid, s;
+    var s;
     opts == null && (opts = {});
-    uid = Math.round(Math.random() * 1000);
+    NGON.id = NGON.readStoredID();
     NGON.socket = s = new Socket(opts);
     NGON.send = s.send;
     s.on('reconnect', function(){
+      s.close();
       return document.location.reload();
     });
     s.on('connect', function(){
       s.send({
-        e: "u/" + uid
+        e: "u/" + NGON.id
       });
-      return f();
+      NGON.Messages.subscribe();
+      if (f != null) {
+        return f();
+      }
     });
     return s.connect();
-  };
-  this.NGON.subscribe = function(endpoint, f){
-    NGON.socket.send({
-      e: endpoint,
-      a: 'sub'
-    });
-    return NGON.socket.on(endpoint, f);
   };
   function bind$(obj, key, target){
     return function(){ return (target || obj)[key].apply(obj, arguments) };

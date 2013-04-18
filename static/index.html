@@ -9,18 +9,25 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
   <style type="text/css">
     body {
-      background-color: #121212;
-      margin:0;
+      background-color: #222;
+      margin:50px;
       padding:0;
       overflow:hidden;
+    }
+    #id {
+      color: #0099ff;
+      font-size: 100px;
+      font-family: sans-serif;
+      font-weight:bold;
     }
   </style>
 </head>
 <body>
+  <div id="id"></div>
   <script src="ngon.js" type="text/javascript"></script>
   <script type="text/javascript">
     NGON.connect(function() {
-      NGON.watchPage();
+        document.getElementById("id").innerHTML = NGON.id;
     });
   </script>
 </body>

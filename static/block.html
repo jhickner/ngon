@@ -36,8 +36,6 @@
         i.on("down", function () {o.lock()});
         i.on("up", function () {o.unlock()});
         i.on("move", function (d) {o.inc({x:d.deltaX, y:d.deltaY})});
-
-        NGON.watchPage();
     });
   </script>
 </body>

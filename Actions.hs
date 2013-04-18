@@ -93,19 +93,15 @@ sendNotifications env@ServerEnv{..} p sts = do
         putMVar sUsers umap'
         return $ mapMaybe ((`M.lookup` umap') . sUId) . Ix.toList $ subs' @+ sts
 
--- sendPacket :: ServerEnv -> Client -> Packet -> IO ()
--- sendPacket _ _ p = print . A.encode $ p
-
 sendPacket :: ServerEnv -> Client -> Packet -> IO ()
 sendPacket env client p = case client of
     (Client uid (SocketClient s)) -> 
       wrap uid $ sendAll s . A.encode $ p
     (Client uid (WebSocketClient s)) -> 
-      wrap uid $ WS.sendSink s . WS.textData . A.encode $ p { pError = Just $ A.toJSON uid }
+      wrap uid $ WS.sendSink s . WS.textData . A.encode $ p
     _ -> return ()
   where
-    wrap uid = handle (ioE $ \e -> putStrLn ("SENDP: " ++ show e) >> disconnectUser uid env)
-
+    wrap uid = handle (ioE $ const $ disconnectUser uid env)
 
 sendHandlePacket :: ClientHandle -> Packet -> IO ()
 sendHandlePacket ch p = case ch of
@@ -360,15 +356,15 @@ msgUser uid env@PacketEnv{..} = do
       Just (Client _ HTTPClient) -> return $ errorResult pPacket "Can't message HTTP clients"
       Just client                -> do
           sendPacket (mkServerEnv env) client p
-          return $ ok pPacket
+          return $ okResult pPacket ("ok"::Text)
   where
-    p = pPacket { pId = Nothing, pEndpoint = ["u", getUId (cUId pClient)] }
+    p = pPacket { pId = Nothing, pEndpoint = ["m", getUId (cUId pClient)] }
 
 msgAllUsers :: PacketEnv -> IO Result
 msgAllUsers env@PacketEnv{..} = do
     getClients env >>= mapM_ (\c -> sendPacket senv c p) 
-    return $ ok pPacket
+    return $ okResult pPacket ("ok"::Text)
   where
     senv = mkServerEnv env
-    p = pPacket { pId = Nothing, pEndpoint = ["u", getUId (cUId pClient)] }
+    p = pPacket { pId = Nothing, pEndpoint = ["m", getUId (cUId pClient)] }
 
