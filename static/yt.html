@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>youtube demo</title>
+  <title>YouTube Viewer</title>
   <meta name="viewport" 
     content="width=device-width, initial-scale=1, minimum-scale=1, user-scalable=no"/>
   <meta name="apple-mobile-web-app-capable" content="yes"/>
@@ -27,15 +27,11 @@
 <body>
   <script src="ngon.js" type="text/javascript"></script>
   <script type="text/javascript">
-    var s = document.location.search;
-    if (s.length > 0) { 
-      var id = s.substr(1);
-      var iframe = document.createElement('iframe');
-      iframe.src = "http://www.youtube.com/embed/" + id + "?controls=0&autoplay=1"
-      document.body.appendChild(iframe);
-    }
+    var iframe = document.createElement('iframe');
+    iframe.src = "http://www.youtube.com/embed/" + N.getQueryValue() + "?controls=0&autoplay=1"
+    document.body.appendChild(iframe);
 
-    NGON.connect();
+    N.connect();
   </script>
 </body>
 </html>

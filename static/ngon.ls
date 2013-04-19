@@ -1,4 +1,4 @@
-@NGON = NGON = {}
+@N = N = {}
 
 EventDispatcher =
   on: (name, fn) ->
@@ -96,7 +96,7 @@ class Uploader
   uploadFailed: (e) ~> console.log "upload failed!: #{e}"
   uploadCanceled: (e) ~> console.log "upload canceled!"
 
-@NGON.Uploader = Uploader
+N.Uploader = Uploader
 
 class DragDropTarget
   (@target, @handler) ->
@@ -117,7 +117,7 @@ class DragDropTarget
       @handler e
       false
 
-@NGON.DragDropTarget = DragDropTarget
+N.DragDropTarget = DragDropTarget
 
 class DragDropUploader extends DragDropTarget
   (target) ->
@@ -128,7 +128,7 @@ class DragDropUploader extends DragDropTarget
       for f in dropEvent.dataTransfer.files
         upload f
 
-@NGON.DragDropUploader = DragDropUploader
+N.DragDropUploader = DragDropUploader
 
 class Interaction implements EventDispatcher
   (@target) ->
@@ -223,7 +223,7 @@ class Interaction implements EventDispatcher
       e.preventDefault!
       false
 
-@NGON.Interaction = Interaction
+N.Interaction = Interaction
 
 class Socket implements EventDispatcher
   (opts = {}) -> 
@@ -280,19 +280,19 @@ class Socket implements EventDispatcher
     @ws.send JSON.stringify msg
     @
 
-@NGON.Socket = Socket
+N.Socket = Socket
 
 class Users implements EventDispatcher
   subscribe: ~>
-    NGON.socket.send {e:\u, a:\sub}
-    NGON.socket.on \packet, (p) ~>
+    N.socket.send {e:\u, a:\sub}
+    N.socket.on \packet, (p) ~>
       if p.e[0] == \u
         @dispatch p.a, p
 
   unsubscribe: ->
-    NGON.socket.send {e:\u, a:\unsub}
+    N.socket.send {e:\u, a:\unsub}
 
-@NGON.Users = new Users
+N.Users = new Users
 
 class Obj implements EventDispatcher
   (@id, initial) ->
@@ -307,92 +307,104 @@ class Obj implements EventDispatcher
         for key, val of packet.p
           @dispatch key, val
 
-    NGON.send {e:@ep, a:"create", p:initial} 
-    NGON.send {e:@ep, a:\sub}
-    NGON.socket.on @ep, handleUpdate
+    N.send {e:@ep, a:"create", p:initial} 
+    N.send {e:@ep, a:\sub}
+    N.socket.on @ep, handleUpdate
 
   set: (...args) ~>
     if args.length == 1
-      NGON.send {e:@ep, p:args[0]}
+      N.send {e:@ep, p:args[0]}
     else if args.length == 2
       o = {}
       o[args[0]] = args[1]
-      NGON.send {e:@ep, p:o}
+      N.send {e:@ep, p:o}
     @
 
   inc: (...args) ~>
     if args.length == 1
-      NGON.send {e:@ep, p:args[0], a:"inc"}
+      N.send {e:@ep, p:args[0], a:"inc"}
     else if args.length == 2
       o = {}
       o[args[0]] = args[1]
-      NGON.send {e:@ep, p:o, a:"inc"}
+      N.send {e:@ep, p:o, a:"inc"}
     @
 
   lock: ~> 
-    NGON.send {e:@ep, a:"lock"}
+    N.send {e:@ep, a:"lock"}
     @
 
   unlock: ~> 
-    NGON.send {e:@ep, a:"unlock"}
+    N.send {e:@ep, a:"unlock"}
     @
         
-@NGON.Object = Obj  
+N.Object = Obj  
 
 class Objects implements EventDispatcher
   subscribe: ~>
-    NGON.socket.send {e:\o, a:\sub}
-    NGON.socket.on \packet, (p) ~>
+    N.socket.send {e:\o, a:\sub}
+    N.socket.on \packet, (p) ~>
       if p.e[0] == \o
         @dispatch p.a, p
 
   unsubscribe: ->
-    NGON.socket.send {e:\o, a:\unsub}
+    N.socket.send {e:\o, a:\unsub}
 
   create: (id, initial) -> new Obj id, initial
 
-@NGON.Objects = new Objects
+N.Objects = new Objects
 
 class Messages implements EventDispatcher
   subscribe: ~>
-    NGON.socket.on \packet, (p) ~>
+    N.socket.on \packet, (p) ~>
       if p.e[0] == \m
         @dispatch p.a, p
 
-@NGON.Messages = new Messages!
+N.Messages = new Messages!
 
-@NGON.Messages.on \url, (p) ->
+N.Messages.on \url, (p) ->
   if p.p?
-    NGON.socket.close!
+    N.socket.close!
     document.location.href = p.p
 
-@NGON.Messages.on \eval, (p) ->
+N.Messages.on \eval, (p) ->
   if p.p?
-    NGON.send {e:"m/#{p.e[1]}", a:\evalresult, p:eval(p.p)}
+    N.send {e:"m/#{p.e[1]}", a:\evalresult, p:eval(p.p)}
 
-@NGON.Messages.on \id, (p) -> 
-  if p.p? then NGON.setID p.p
+N.Messages.on \id, (p) -> 
+  if p.p? then N.setID p.p
 
-@NGON.setID = (un) ->
+N.setID = (un) ->
   localStorage.ngon_id = un
-  NGON.socket.close!
+  N.socket.close!
   document.location.reload!
 
-@NGON.readStoredID = ->
+N.readStoredID = ->
   name = localStorage.ngon_id
   unless name? 
     name = Math.round Math.random! * 1000
   name
 
-@NGON.connect = (f, opts = {}) ->
-  NGON.id = NGON.readStoredID!
-  NGON.socket = s = new Socket opts
-  NGON.send = s.send
+N.getQueryValue = -> window.location.search.substring 1
+
+N.getQueryParams = ->
+  pl = /\+/g
+  search = /([^&=]+)=?([^&]*)/g
+  decode = (s) -> decodeURIComponent s.replace(pl, " ")
+  query = window.location.search.substring 1
+  queryParams = {}
+  while m = search.exec query
+     queryParams[decode m[1]] = decode m[2]
+  queryParams
+
+N.connect = (f, opts = {}) ->
+  N.id = N.readStoredID!
+  N.socket = s = new Socket opts
+  N.send = s.send
   s.on \reconnect, -> 
     s.close!
     document.location.reload!
   s.on \connect, ->
-    s.send {e:"u/#{NGON.id}"}
-    NGON.Messages.subscribe!
+    s.send {e:"u/#{N.id}"}
+    N.Messages.subscribe!
     if f? then f!
   s.connect!

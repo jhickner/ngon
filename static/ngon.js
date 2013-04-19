@@ -1,6 +1,6 @@
 (function(){
-  var NGON, EventDispatcher, Uploader, DragDropTarget, DragDropUploader, Interaction, Socket, Users, Obj, Objects, Messages, slice$ = [].slice;
-  this.NGON = NGON = {};
+  var N, EventDispatcher, Uploader, DragDropTarget, DragDropUploader, Interaction, Socket, Users, Obj, Objects, Messages, slice$ = [].slice;
+  this.N = N = {};
   EventDispatcher = {
     on: function(name, fn){
       if (this.events == null) {
@@ -123,7 +123,7 @@
     };
     return Uploader;
   }());
-  this.NGON.Uploader = Uploader;
+  N.Uploader = Uploader;
   DragDropTarget = (function(){
     DragDropTarget.displayName = 'DragDropTarget';
     var prototype = DragDropTarget.prototype, constructor = DragDropTarget;
@@ -150,7 +150,7 @@
     }
     return DragDropTarget;
   }());
-  this.NGON.DragDropTarget = DragDropTarget;
+  N.DragDropTarget = DragDropTarget;
   DragDropUploader = (function(superclass){
     var prototype = extend$((import$(DragDropUploader, superclass).displayName = 'DragDropUploader', DragDropUploader), superclass).prototype, constructor = DragDropUploader;
     function DragDropUploader(target){
@@ -169,7 +169,7 @@
     }
     return DragDropUploader;
   }(DragDropTarget));
-  this.NGON.DragDropUploader = DragDropUploader;
+  N.DragDropUploader = DragDropUploader;
   Interaction = (function(){
     Interaction.displayName = 'Interaction';
     var prototype = Interaction.prototype, constructor = Interaction;
@@ -280,7 +280,7 @@
     };
     return Interaction;
   }(EventDispatcher));
-  this.NGON.Interaction = Interaction;
+  N.Interaction = Interaction;
   Socket = (function(){
     Socket.displayName = 'Socket';
     var prototype = Socket.prototype, constructor = Socket;
@@ -356,25 +356,25 @@
     };
     return Socket;
   }(EventDispatcher));
-  this.NGON.Socket = Socket;
+  N.Socket = Socket;
   Users = (function(){
     Users.displayName = 'Users';
     var prototype = Users.prototype, constructor = Users;
     importAll$(prototype, arguments[0]);
     prototype.subscribe = function(){
       var this$ = this;
-      NGON.socket.send({
+      N.socket.send({
         e: 'u',
         a: 'sub'
       });
-      return NGON.socket.on('packet', function(p){
+      return N.socket.on('packet', function(p){
         if (p.e[0] === 'u') {
           return this$.dispatch(p.a, p);
         }
       });
     };
     prototype.unsubscribe = function(){
-      return NGON.socket.send({
+      return N.socket.send({
         e: 'u',
         a: 'unsub'
       });
@@ -384,7 +384,7 @@
     }
     return Users;
   }(EventDispatcher));
-  this.NGON.Users = new Users;
+  N.Users = new Users;
   Obj = (function(){
     Obj.displayName = 'Obj';
     var prototype = Obj.prototype, constructor = Obj;
@@ -411,29 +411,29 @@
           return results$;
         }
       };
-      NGON.send({
+      N.send({
         e: this.ep,
         a: "create",
         p: initial
       });
-      NGON.send({
+      N.send({
         e: this.ep,
         a: 'sub'
       });
-      NGON.socket.on(this.ep, handleUpdate);
+      N.socket.on(this.ep, handleUpdate);
     }
     prototype.set = function(){
       var args, o;
       args = slice$.call(arguments);
       if (args.length === 1) {
-        NGON.send({
+        N.send({
           e: this.ep,
           p: args[0]
         });
       } else if (args.length === 2) {
         o = {};
         o[args[0]] = args[1];
-        NGON.send({
+        N.send({
           e: this.ep,
           p: o
         });
@@ -444,7 +444,7 @@
       var args, o;
       args = slice$.call(arguments);
       if (args.length === 1) {
-        NGON.send({
+        N.send({
           e: this.ep,
           p: args[0],
           a: "inc"
@@ -452,7 +452,7 @@
       } else if (args.length === 2) {
         o = {};
         o[args[0]] = args[1];
-        NGON.send({
+        N.send({
           e: this.ep,
           p: o,
           a: "inc"
@@ -461,14 +461,14 @@
       return this;
     };
     prototype.lock = function(){
-      NGON.send({
+      N.send({
         e: this.ep,
         a: "lock"
       });
       return this;
     };
     prototype.unlock = function(){
-      NGON.send({
+      N.send({
         e: this.ep,
         a: "unlock"
       });
@@ -476,25 +476,25 @@
     };
     return Obj;
   }(EventDispatcher));
-  this.NGON.Object = Obj;
+  N.Object = Obj;
   Objects = (function(){
     Objects.displayName = 'Objects';
     var prototype = Objects.prototype, constructor = Objects;
     importAll$(prototype, arguments[0]);
     prototype.subscribe = function(){
       var this$ = this;
-      NGON.socket.send({
+      N.socket.send({
         e: 'o',
         a: 'sub'
       });
-      return NGON.socket.on('packet', function(p){
+      return N.socket.on('packet', function(p){
         if (p.e[0] === 'o') {
           return this$.dispatch(p.a, p);
         }
       });
     };
     prototype.unsubscribe = function(){
-      return NGON.socket.send({
+      return N.socket.send({
         e: 'o',
         a: 'unsub'
       });
@@ -507,14 +507,14 @@
     }
     return Objects;
   }(EventDispatcher));
-  this.NGON.Objects = new Objects;
+  N.Objects = new Objects;
   Messages = (function(){
     Messages.displayName = 'Messages';
     var prototype = Messages.prototype, constructor = Messages;
     importAll$(prototype, arguments[0]);
     prototype.subscribe = function(){
       var this$ = this;
-      return NGON.socket.on('packet', function(p){
+      return N.socket.on('packet', function(p){
         if (p.e[0] === 'm') {
           return this$.dispatch(p.a, p);
         }
@@ -525,33 +525,33 @@
     }
     return Messages;
   }(EventDispatcher));
-  this.NGON.Messages = new Messages();
-  this.NGON.Messages.on('url', function(p){
+  N.Messages = new Messages();
+  N.Messages.on('url', function(p){
     if (p.p != null) {
-      NGON.socket.close();
+      N.socket.close();
       return document.location.href = p.p;
     }
   });
-  this.NGON.Messages.on('eval', function(p){
+  N.Messages.on('eval', function(p){
     if (p.p != null) {
-      return NGON.send({
+      return N.send({
         e: "m/" + p.e[1],
         a: 'evalresult',
         p: eval(p.p)
       });
     }
   });
-  this.NGON.Messages.on('id', function(p){
+  N.Messages.on('id', function(p){
     if (p.p != null) {
-      return NGON.setID(p.p);
+      return N.setID(p.p);
     }
   });
-  this.NGON.setID = function(un){
+  N.setID = function(un){
     localStorage.ngon_id = un;
-    NGON.socket.close();
+    N.socket.close();
     return document.location.reload();
   };
-  this.NGON.readStoredID = function(){
+  N.readStoredID = function(){
     var name;
     name = localStorage.ngon_id;
     if (name == null) {
@@ -559,21 +559,38 @@
     }
     return name;
   };
-  this.NGON.connect = function(f, opts){
+  N.getQueryValue = function(){
+    return window.location.search.substring(1);
+  };
+  N.getQueryParams = function(){
+    var pl, search, decode, query, queryParams, m;
+    pl = /\+/g;
+    search = /([^&=]+)=?([^&]*)/g;
+    decode = function(s){
+      return decodeURIComponent(s.replace(pl, " "));
+    };
+    query = window.location.search.substring(1);
+    queryParams = {};
+    while (m = search.exec(query)) {
+      queryParams[decode(m[1])] = decode(m[2]);
+    }
+    return queryParams;
+  };
+  N.connect = function(f, opts){
     var s;
     opts == null && (opts = {});
-    NGON.id = NGON.readStoredID();
-    NGON.socket = s = new Socket(opts);
-    NGON.send = s.send;
+    N.id = N.readStoredID();
+    N.socket = s = new Socket(opts);
+    N.send = s.send;
     s.on('reconnect', function(){
       s.close();
       return document.location.reload();
     });
     s.on('connect', function(){
       s.send({
-        e: "u/" + NGON.id
+        e: "u/" + N.id
       });
-      NGON.Messages.subscribe();
+      N.Messages.subscribe();
       if (f != null) {
         return f();
       }
