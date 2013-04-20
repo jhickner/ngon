@@ -1,7 +1,7 @@
 -- adapted from the pipes-network package
 -- http://hackage.haskell.org/package/pipes-network
 
-module TCP (
+module Ngon.TCP (
   -- * Server side
   -- $server-side
   serve,

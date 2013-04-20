@@ -43,10 +43,11 @@ import qualified Data.Attoparsec as PB
 import qualified Data.Aeson as A
 import Data.Aeson (encode)
 
-import Types
-import Actions
-import TCP
-import Utils
+import Ngon.TCP
+import Ngon.Types
+import Ngon.Actions
+import Ngon.Utils
+import Ngon.Packet
 
 -------------------------------------------------------------------------------
 -- Main / Server
@@ -179,12 +180,12 @@ webSocketDecoder action = loop
 
 runSocketServer env@ServerEnv{..} =
     serveFork (Host "0.0.0.0") "8001" $ \(sock, _remoteAddr) -> do
-        (bs, mclient) <- socketDecoder sock Nothing $ 
+        (mbs, mclient) <- socketDecoder sock Nothing $ 
             runConnectPacket env (SocketClient sock)
         case mclient of
           Nothing     -> return () -- disconnected
           Just client -> flip finally (cleanup client) $ 
-              void $ socketDecoder sock (Just bs) $ \p -> do
+              void $ socketDecoder sock mbs $ \p -> do
                   mrpacket <- runPacket $ PacketEnv env client p
                   maybe (return ()) (sendAll sock . toStrict . encode) mrpacket
                   return Nothing
@@ -194,27 +195,24 @@ runSocketServer env@ServerEnv{..} =
 -- | loop parsing JSON as long as action returns Nothing
 socketDecoder :: A.FromJSON a => Socket 
               -> Maybe B.ByteString
-              -> (a -> IO (Maybe b)) -> IO (B.ByteString, Maybe b)
+              -> (a -> IO (Maybe b)) -> IO (Maybe B.ByteString, Maybe b)
 socketDecoder sock bs action = loop Nothing bs
   where 
     loop mpartial mbytes = do
         bytes <- maybe (recv sock 4096) return mbytes
         if B.null bytes
-          then return (B.empty, Nothing)
+          then return (Nothing, Nothing)
           else case maybe (PB.parse A.json') PB.feed mpartial bytes of
             PB.Fail _ _ _reason -> loop Nothing Nothing
             k@PB.Partial{}      -> loop (Just k) Nothing
             PB.Done bytes' v    -> do
+                let lbs = if B.null bytes' then Nothing else Just bytes'
                 mb <- case A.fromJSON v of
                              A.Success a -> action a
                              _           -> return Nothing
                 case mb of
-                  Just b  -> 
-                      -- return any extra bytes along with the result
-                      return (bytes', Just b)
-                  Nothing -> loop Nothing $ if B.null bytes' 
-                                              then Nothing 
-                                              else Just bytes'
+                  Just b  -> return (lbs, Just b)
+                  Nothing -> loop Nothing lbs
 
 -------------------------------------------------------------------------------
 -- Packet Processing

@@ -1,4 +1,4 @@
-module Utils where
+module Ngon.Utils where
 
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString as B

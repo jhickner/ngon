@@ -1,27 +1,22 @@
-{-# LANGUAGE RecordWildCards, OverloadedStrings, GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE OverloadedStrings, GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE DeriveDataTypeable #-}
 
-module Types where
+module Ngon.Types where
 
-import Control.Applicative
-import Control.Monad
 import Control.Concurrent.MVar
 
 import Network.Socket (Socket)
 import Network.WebSockets (WebSockets, Sink, TextProtocol, Hybi00)
 
-import qualified Data.ByteString.Lazy.Char8 as BL
 import Data.Hashable (Hashable, hashWithSalt, hashUsing)
 import Data.Data
 import Data.IxSet
 import Data.HashMap.Strict (HashMap)
 import Data.Text (Text)
 import qualified Data.Text as T
-import qualified Data.Aeson as A
-import Data.Aeson (Object, Value(..), object, ToJSON(..), FromJSON(..), (.=), (.:?), (.:))
+import Data.Aeson (Object, Value(..), ToJSON(..))
 
-import Data.Monoid
-import Data.Maybe (isJust, fromMaybe)
+import Ngon.Packet
 
 data OId = OId { getOId :: Text} deriving (Show, Eq, Ord, Data, Typeable)
 data UId = UId { getUId :: Text} deriving (Show, Eq, Ord, Data, Typeable)
@@ -90,47 +85,6 @@ httpClient = Client (UId "http") HTTPClient
 
 isHTTP :: Client -> Bool
 isHTTP client = cHandle client == HTTPClient 
-
-data Packet = Packet
-    { pId       :: Maybe Integer
-    , pEndpoint :: [EndpointComponent]
-    , pAction   :: Text
-    , pPayload  :: Maybe Value
-    , pError    :: Maybe Value
-    } deriving (Eq)
-
-instance Show Packet where
-  show = BL.unpack . A.encode
-
-hasId :: Packet -> Bool
-hasId = isJust . pId
-
-type EndpointComponent = Text
-
-instance FromJSON Packet where
-  parseJSON (Object o) = do
-      id' <- o .:? "id"
-      e   <- map T.strip . T.split (=='/') <$> o .: "e" 
-      a   <- (T.toLower <$>) <$> o .:? "a"
-      p   <- o .:? "p"
-      err <- o .:? "err"
-      return $ Packet id' e (action p a) p err 
-    where
-      action p = fromMaybe (maybe "get" (const "set") p)
-  parseJSON _ = mzero
-
-instance ToJSON Packet where
-  toJSON Packet{..} = object $ mconcat 
-    [ maybeField "id" pId
-    , ["e" .= T.intercalate "/" pEndpoint]
-    -- trim set and get since they can inferred
-    , if pAction `elem` ["set", "get"] then mempty else ["a" .= pAction]
-    , maybeField "p" pPayload
-    , maybeField "err" pError
-    ]
-    where
-      maybeField _ Nothing     = mempty
-      maybeField name (Just a) = [name .= a]
 
 data Result 
   = OK Notifications Packet

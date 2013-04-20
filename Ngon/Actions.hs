@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings, RecordWildCards #-}
 
-module Actions where
+module Ngon.Actions where
 
 import System.FilePath
 import System.Directory
@@ -26,7 +26,8 @@ import Data.IxSet ((@+), (@=))
 import qualified Data.Aeson as A
 import Data.Aeson ((.=))
 
-import Types
+import Ngon.Types
+import Ngon.Packet
 
 -------------------------------------------------------------------------------
 -- Result combinators
