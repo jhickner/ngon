@@ -368,7 +368,12 @@ N.Messages.on \url, (p) ->
 
 N.Messages.on \eval, (p) ->
   if p.p?
-    N.send {e:"m/#{p.e[1]}", a:\evalresult, p:eval(p.p)}
+    res = eval p.p
+    try
+      JSON.stringify res
+    catch 
+      res = res.toString!
+    N.send {e:"m/#{p.e[1]}", a:\evalresult, p:res}
 
 N.Messages.on \id, (p) -> 
   if p.p? then N.setID p.p

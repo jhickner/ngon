@@ -533,11 +533,19 @@
     }
   });
   N.Messages.on('eval', function(p){
+    var res, e;
     if (p.p != null) {
+      res = eval(p.p);
+      try {
+        JSON.stringify(res);
+      } catch (e$) {
+        e = e$;
+        res = res.toString();
+      }
       return N.send({
         e: "m/" + p.e[1],
         a: 'evalresult',
-        p: eval(p.p)
+        p: res
       });
     }
   });

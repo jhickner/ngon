@@ -12,6 +12,7 @@ import Network.HTTP.Types
 
 import Network.Socket (Socket)
 import Network.Socket.ByteString (recv, sendAll)
+import Network.Simple.TCP
 
 import Data.Conduit (runResourceT, ($$))
 import Data.Conduit.List (consume)
@@ -43,7 +44,6 @@ import qualified Data.Attoparsec as PB
 import qualified Data.Aeson as A
 import Data.Aeson (encode)
 
-import Ngon.TCP
 import Ngon.Types
 import Ngon.Actions
 import Ngon.Utils
