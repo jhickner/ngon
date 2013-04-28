@@ -305,6 +305,10 @@
         this$.ws.onopen = function(){
           console.log("connected!");
           this$.connected = true;
+          window.addEventListener('beforeunload', function(){
+            this$.close();
+            return null;
+          });
           this$.dispatch(this$.firstConnection ? 'connect' : 'reconnect');
           return this$.firstConnection = false;
         };
@@ -343,7 +347,7 @@
       }
     }
     prototype.close = function(){
-      this.opts.reconnect = false;
+      this.ws.onclose = null;
       this.ws.close();
       return this;
     };
@@ -528,7 +532,6 @@
   N.Messages = new Messages();
   N.Messages.on('url', function(p){
     if (p.p != null) {
-      N.socket.close();
       return document.location.href = p.p;
     }
   });
@@ -556,16 +559,18 @@
   });
   N.setID = function(un){
     localStorage.ngon_id = un;
-    N.socket.close();
     return document.location.reload();
   };
-  N.readStoredID = function(){
-    var name;
-    name = localStorage.ngon_id;
-    if (name == null) {
-      name = Math.round(Math.random() * 1000);
+  N.discoverID = function(){
+    var id, ref$;
+    id = (ref$ = window.frameElement) != null ? ref$.getAttribute('data-ngon-id') : void 8;
+    if (id == null) {
+      id = localStorage.ngon_id;
     }
-    return name;
+    if (id == null) {
+      id = Math.round(Math.random() * 1000);
+    }
+    return id;
   };
   N.getQueryValue = function(){
     return window.location.search.substring(1);
@@ -587,11 +592,10 @@
   N.connect = function(f, opts){
     var s;
     opts == null && (opts = {});
-    N.id = N.readStoredID();
+    N.id = N.discoverID();
     N.socket = s = new Socket(opts);
     N.send = s.send;
     s.on('reconnect', function(){
-      s.close();
       return document.location.reload();
     });
     s.on('connect', function(){

@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>NGON</title>
+  <meta name="viewport" 
+    content="width=device-width, initial-scale=1, minimum-scale=1, user-scalable=no"/>
+  <meta name="apple-mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+  <style type="text/css">
+    body {padding:0; margin:0; overflow:hidden;}
+    iframe {position:absolute; padding:0; margin:0; border:0; overflow:hidden;}
+  </style>
+</head>
+<body>
+  <script src="ngon.js" type="text/javascript"></script>
+  <script type="text/javascript">
+    var iframes = [];
+    var prefix = N.discoverID();
+
+    function buildFrames(n) {
+      var i, f;
+      if (iframes.length > n) {
+        for (i=n;i<iframes.length;i++) {
+          document.body.removeChild(iframes[i]);
+        }
+        iframes.splice(n);
+      }
+      else {
+        for(i=iframes.length;i<n;i++) {
+          f = document.createElement('iframe');
+          f.setAttribute('data-ngon-id', prefix + (i+1).toString());
+          f.src = '3d.html'
+          iframes.push(f);
+          document.body.appendChild(f);
+        }
+      }
+    }
+
+    function findLargest(splits) {
+      var lArea = 0, idx, s, i, a;
+      for (i=0;i<splits.length;i++) {
+        s = splits[i];
+        a = s.w * s.h;
+        if (a > lArea) {
+          lArea = a
+          idx = i;
+        }
+      }
+      return idx;
+    }
+
+    function splitAt(idx, splits) {
+      var h, w, s = splits[idx];
+      if (s.w >= s.h) {
+        w = Math.round(s.w/2);
+        splits.splice(idx,1, 
+            {x:s.x, y:s.y, w:w, h:s.h},
+            {x:w+s.x, y:s.y, w:w, h:s.h});
+      }
+      else {
+        h = Math.round(s.h/2);
+        splits.splice(idx,1, 
+            {x:s.x, y:s.y, w:s.w, h:h},
+            {x:s.x, y:h+s.y, w:s.w, h:h});
+      }
+    }
+
+    function layoutFrames() {
+      var splits = [{x:0, y:0, w:window.innerWidth, h:window.innerHeight}];
+      var i, s, f;
+
+      for(i=0;i<iframes.length-1;i++) {
+        splitAt(findLargest(splits), splits);
+      }
+
+      for(i=0;i<iframes.length;i++) {
+        s = splits[i];
+        f = iframes[i];
+        f.style.cssText += ";left:" + s.x + "px; top:" + s.y + 
+          "px; width:" + s.w + 
+          "px; height:" + s.h + "px;"
+      }
+    }
+
+    window.addEventListener('resize', layoutFrames);
+    
+    N.makeSplits = function(n) {
+      buildFrames(n+1);
+      layoutFrames();
+    }
+
+    N.makeSplits(0);
+
+    N.connect();
+  </script>
+</body>
+</html>

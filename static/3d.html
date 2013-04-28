@@ -62,6 +62,12 @@
     init();
     animate();
 
+    window.addEventListener('resize', function() {
+      camera.aspect = window.innerWidth/window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+
     N.connect(function() {
       var cube = new N.Object('cube', {s:1, rx:0, rz:0});
       cube.on('rx', function(rx) { rotX = rx; });

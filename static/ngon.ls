@@ -243,6 +243,9 @@ class Socket implements EventDispatcher
       @ws.onopen = ~> 
         console.log "connected!"
         @connected = true
+        window.addEventListener \beforeunload, ~>
+          @close!
+          null
         @dispatch if @firstConnection then \connect else \reconnect
         @firstConnection = false
       @ws.onmessage = (e) ~> 
@@ -268,7 +271,7 @@ class Socket implements EventDispatcher
     @connect! if @opts.autoConnect
 
   close: ~> 
-    @opts.reconnect = false
+    @ws.onclose = null
     @ws.close!
     @
 
@@ -362,9 +365,7 @@ class Messages implements EventDispatcher
 N.Messages = new Messages!
 
 N.Messages.on \url, (p) ->
-  if p.p?
-    N.socket.close!
-    document.location.href = p.p
+  if p.p? then document.location.href = p.p
 
 N.Messages.on \eval, (p) ->
   if p.p?
@@ -380,14 +381,13 @@ N.Messages.on \id, (p) ->
 
 N.setID = (un) ->
   localStorage.ngon_id = un
-  N.socket.close!
   document.location.reload!
 
-N.readStoredID = ->
-  name = localStorage.ngon_id
-  unless name? 
-    name = Math.round Math.random! * 1000
-  name
+N.discoverID = ->
+  id = window.frameElement?.getAttribute 'data-ngon-id'
+  unless id? then id = localStorage.ngon_id
+  unless id? then id = Math.round Math.random! * 1000
+  id
 
 N.getQueryValue = -> window.location.search.substring 1
 
@@ -402,12 +402,10 @@ N.getQueryParams = ->
   queryParams
 
 N.connect = (f, opts = {}) ->
-  N.id = N.readStoredID!
+  N.id = N.discoverID!
   N.socket = s = new Socket opts
   N.send = s.send
-  s.on \reconnect, -> 
-    s.close!
-    document.location.reload!
+  s.on \reconnect, -> document.location.reload!
   s.on \connect, ->
     s.send {e:"u/#{N.id}"}
     N.Messages.subscribe!
